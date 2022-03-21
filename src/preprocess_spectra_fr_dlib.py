@@ -42,27 +42,21 @@ def modseq_renamer( modseq ):
     return modseq
 
 
-def pad_array( array, peptide_len, precursor_z, ):
-    padded_array = np.asarray( [-1.0]*(4*(constants.max_peptide_len-1)), 'float32', )
-    if precursor_z == 1:
-        for i in range(2):
-            padded_array[ i*2*(constants.max_peptide_len-1) : 
-                          i*2*(constants.max_peptide_len-1)+peptide_len-1 ] = array[ (peptide_len-1)*i : 
-                                                                                     (peptide_len-1)*(i+1) ]
-    else:
-        for i in range(4):
-            padded_array[ i*(constants.max_peptide_len-1) : 
-                          i*(constants.max_peptide_len-1)+peptide_len-1 ] = array[ (peptide_len-1)*i : 
-                                                                                   (peptide_len-1)*(i+1) ]
-    return padded_array
+
+def pad_array( array, n_ion_types=4, ): #peplen, precursor_z, ):
+    padded_array = np.full( ( n_ion_types, constants.max_peptide_len-1 ), -1.0, 'float32' )
+    for i, row in enumerate( array ):
+        padded_array[ i, :len(row)] = row
+    return padded_array 
 
 
 
-def ion_array_matcher( search_mzs, mzs, ints, frag_type='hcd',):
+
+def ion_array_matcher( search_mzs, mzs, ints, resolution='high',):
     search_ints = []
     for s_mz in search_mzs:
         idx = np.abs(mzs-s_mz).argmin()
-        mass_tolerance = constants.return_tolerance( s_mz, frag_type )
+        mass_tolerance = constants.return_tolerance( s_mz, resolution, )
         if np.abs(mzs[idx] - s_mz) <= mass_tolerance:
             ion_int = ints[idx]
         else:
@@ -70,6 +64,9 @@ def ion_array_matcher( search_mzs, mzs, ints, frag_type='hcd',):
         search_ints.append( ion_int )
     norm_ints = np.array(search_ints) / ( np.max( search_ints ) + constants.epsilon )
     return norm_ints
+
+
+
         
 def decompress_spectrum( record ):
     mzs = np.ndarray( shape = (int(record['MassEncodedLength']/8)), 
@@ -80,23 +77,25 @@ def decompress_spectrum( record ):
                        buffer = zlib.decompress(record['IntensityArray']) ).astype( 'float64' )
     return mzs, ints
 
+
+
+
 def dlib_row_parser( record, frag_type, nce, ):
     modseq = modseq_renamer( str( record['PeptideModSeq'] ) )
     mod_dict = modseq_toModDict( modseq )
-    peptide_len = len( record['PeptideSeq'] ) 
-    key_name = modseq+'_'+str(record['PrecursorCharge'])
-    
     if len(mod_dict) > 0:
          print( 'Invalid modifications in ' + modseq )
          return 0
+    
+    
+    peptide_len = len( record['PeptideSeq'] ) 
     if peptide_len > constants.max_peptide_len or peptide_len < constants.min_peptide_len:
         print( modseq + ' outside valid size range' )
         return 0
     
-
     # Extract and label spectra
+    key_name = modseq+'_'+str(record['PrecursorCharge'])
     mzs, ints = decompress_spectrum( record )
-
     predict_z = np.min( [ record['PrecursorCharge'], 3 ] )
     ion_mzs = ladder_mz_generator( record['PeptideModSeq'], charge=predict_z )
     

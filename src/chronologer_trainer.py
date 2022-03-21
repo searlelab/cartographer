@@ -1,5 +1,8 @@
 
+import os, sys, argparse
+from datetime import datetime
 import numpy as np
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 from local_io import read_rt_database
 from constants import chronologer_db_loc, seed, validation_fraction, max_peptide_len 
@@ -8,6 +11,29 @@ from tensorize import hi_db_to_tensors, residues
 from chronologer_model import chronologer_model
 from loss_functions import RT_masked_negLogL
 from training_loop import train_model
+
+def parse_args(args):
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    timestamp = datetime.now().strftime( '%Y%m%d%H%M%S' )
+    default_out_filename = 'Chronologer_'+timestamp+'.pt'
+    parser = argparse.ArgumentParser()
+    #parser.add_argument('input_file',
+    #                    type=str,
+    #                    help='path to input dlib')
+    parser.add_argument('--output_file',
+                        type=str,
+                        help='Model filename',
+                        default=default_out_filename)
+    parser.add_argument('--output_dir',
+                        type=str,
+                        help='Directory to save model (default is Chronologer/models)',
+                        default=os.path.join(src_dir,'..','models'))
+    
+    #parser.add_argument('--n_threads',
+    #                    type=int,
+    #                    help='Number of threads for processing',
+    #                    default=4)
+    return parser.parse_args(args)
 
 
 def split_train_test_data( db, test_frac, random_seed, ):
@@ -20,8 +46,7 @@ def split_train_test_data( db, test_frac, random_seed, ):
     
 
 
-def train_chronologer( device='cpu', test_frac=validation_fraction, random_seed = seed, ):
-    
+def train_chronologer( output_file_name, test_frac=validation_fraction, random_seed = seed, ):
     # Prepare data
     print( 'Chronologer training initiated' )
     chronologer_db = read_rt_database( chronologer_db_loc, )
@@ -43,11 +68,6 @@ def train_chronologer( device='cpu', test_frac=validation_fraction, random_seed 
     optimizer = training_parameters[ 'optimizer' ]( parameters,
                                                     lr = training_parameters[ 'learning_rate' ], )
     
-    ## ## ##
-    ## ## ##
-    output_file_name = 'TEST.PT' ## NEED TO FIX
-    ## ## ##
-    ## ## ##
     print( 'Ready to begin Chronologer training' )
     final_loss = train_model( model, 
                               datasets, 
@@ -60,8 +80,15 @@ def train_chronologer( device='cpu', test_frac=validation_fraction, random_seed 
                               training_parameters[ 'train_device' ], 
                               training_parameters[ 'eval_device' ],
                               output_file_name, )
+    return final_loss
     
-    
-    
-    
-train_chronologer()
+
+def main():
+    args = parse_args(sys.argv[1:])
+    model_out_file = os.path.join( args.output_dir, args.output_file, )
+    train_chronologer( model_out_file, )
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit()

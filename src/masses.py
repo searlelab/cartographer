@@ -72,25 +72,38 @@ def modseq_toModDict(mod_seq):
         temp_seq = temp_seq[:mod_start_index] + temp_seq[mod_end_index+1:]
     return mods
 
+def modseq_to_seq( mod_seq ):
+    return re.sub(r'\[.+?\]','',mod_seq)
 
 
-
-def fragment_mass_generator(mod_seq, charge=2):
-    seq = re.sub(r'\[.+?\]','',mod_seq)
+def ladder_mz_generator(mod_seq, charge=2, max_fragment_z=3, ):
+    seq = modseq_to_seq( mod_seq )
     ## Identify modifications
     mods = modseq_toModDict(mod_seq)
 
-    residue_masses = [ masses[a] for a in seq ]
-    for m in mods: residue_masses[m-1] += mods[m]
-
+    residue_masses = np.array( [ masses[a] for a in seq ] )
+    mod_masses = np.array( [ mods[m] if i+1 in mods else 0.0 
+                             for i in range(seq) ] )
+    residue_wMod_masses = residue_masses + mod_masses
+    
     peptide_mass = mass_calc( seq, mods=mods )
     frag_masses = {}
-    frag_masses['b'] = np.cumsum( residue_masses[:-1] )
+    frag_masses['b'] = np.cumsum( residue_wMod_masses[:-1] )
     frag_masses['y'] = peptide_mass - frag_masses['b'][::-1]
-
-    mzs = []
-    for ion_type, fragment_z in itertools.product( ['b','y'], range(1,charge+1) ):
-        mzs += list( (frag_masses[ion_type]+p_mass*fragment_z) / fragment_z )
-        
-    return mzs
-
+    
+    phos_loc = np.array( [ m == mod_masses['Phospho'] for m in mod_masses ] )
+    phos_mask = np.cumsum( phos_loc ) >= 1
+    b_phos_mask = phos_mask[:-1]
+    frag_masses['b-PO4'] = b_phos_mask *\
+                           (frag_masses['b'] - b_phos_mask*masses['Phospho'])
+    y_phos_mask = phos_mask[::-1][:-1]
+    frag_masses['y-PO4'] = y_phos_mask *\
+                           (frag_masses['y'] - y_phos_mask*masses['Phospho'])
+                           
+    mz_array = []
+    for frag_type in frag_masses:
+        for frag_z in range( 1, max_fragment_z+1, ):
+            mzs = (frag_masses[frag_type]+p_mass*frag_z) / frag_z
+            mzs = mzs * ( frag_z <= charge ) # Mask out impossible ions
+            mz_array.append( mzs )
+    return mz_array # Current structure is (12, peplen-1)), consider flattening

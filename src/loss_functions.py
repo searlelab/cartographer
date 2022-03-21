@@ -16,7 +16,7 @@ def generate_outlier_mask( array, distribution, fdr, ):
 
 def l2_norm( vector, eps=epsilon, ):
     sum_sqs = torch.sum( vector**2, dim=(1,-1), keepdims=True, )
-    denom = torch.sqrt( torch.max( sum_sqs, eps, ) )
+    denom = torch.sqrt( sum_sqs.clamp( eps, ) )
     #print( vector.shape, sum_sqs.shape, denom.shape, )
     return vector / denom
 
@@ -46,7 +46,7 @@ class RT_masked_negLogL( nn.Module ):
     
 class Spectrum_masked_negLogit( nn.Module ):
     def __init__( self, fdr=train_fdr, ):
-        super.__init__()
+        super().__init__()
         self.fdr = fdr
 
     def forward( self, pred, true, weights, eps=epsilon, ):
@@ -57,9 +57,10 @@ class Spectrum_masked_negLogit( nn.Module ):
         pred_norm = l2_norm( pred_masked, eps, )
         true_norm = l2_norm( true_masked, eps, )
         product = torch.sum( pred_norm * true_norm, dim=(1,-1), )
-        neg_logit = neg_logit( product, )
+        score = neg_logit( product, )
         
-        mean_neg_logit = ( torch.sum( neg_logit * outlier_mask ) + eps ) /\
+        outlier_mask = generate_outlier_mask( score, 'gumbel', self.fdr, )
+        mean_neg_logit = ( torch.sum( score * outlier_mask ) + eps ) /\
                          ( torch.sum( outlier_mask ) + eps )
                          
         return mean_neg_logit
