@@ -12,6 +12,9 @@ max_precursor_charge = 6
 chronologer_db_loc = '../data/Chronologer_DB_220308.gz'
 cartographer_ptdata_loc = '../data/Cartographer_PT/'
 
+default_cartographer_model_file = '../models/Cartographer_20220319002135.pt'
+default_chronologer_model_file = '../models/Chronologer_20220317200246.pt'
+
 seed = 2447
 
 validation_fraction = 0.2

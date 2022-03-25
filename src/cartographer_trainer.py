@@ -3,17 +3,18 @@ from datetime import datetime
 import numpy as np
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
-from cartographer_settings import hyperparameters, training_parameters
-from tensorize import residues
-from cartographer_model import cartographer_model
+from cartographer_settings import training_parameters
+from tensorize import codedseq_to_array
+from cartographer_model import initialize_cartographer_model
 from loss_functions import Spectrum_masked_negLogit
 from training_loop import train_model
+from constants import cartographer_ptdata_loc, seed, validation_fraction, max_peptide_len, min_precursor_charge, max_precursor_charge
+
 
 import torch
 from torch.utils.data import TensorDataset
 
-from constants import cartographer_ptdata_loc, seed, validation_fraction, max_peptide_len, min_precursor_charge, max_precursor_charge
-from tensorize import char_mapper
+
 
 def parse_args(args):
     src_dir = os.path.dirname(os.path.abspath(__file__))
@@ -71,7 +72,7 @@ def split_train_test_data( data, test_frac, random_seed, ): # NEED TO FIX INPUTS
         ## WHEN IT COMES INTO TRAIN-TEST SPLIT
         
         for data_type in keys:
-            seq_array = [ char_mapper( re.sub(r'\[.+?\]',
+            seq_array = [ codedseq_to_array( re.sub(r'\[.+?\]',
                                           '',
                                           data[d][x]['peptide_mod_seq'] ) ) 
                       for x in keys[data_type] ]
@@ -119,15 +120,7 @@ def train_cartographer( output_file_name, test_frac=validation_fraction, random_
     print( 'Cartographer PT data loaded' )
     datasets = split_train_test_data( data, test_frac, random_seed )
     print( 'Training and testing data split' )
-    model = cartographer_model( max_peptide_len + 2,
-                                len( residues ) + 1, 
-                                max_precursor_charge - min_precursor_charge + 1,
-                                hyperparameters[ 'embed_dimension' ],
-                                hyperparameters[ 'nce_encode_dimension' ],
-                                hyperparameters[ 'n_resnet_blocks' ],
-                                hyperparameters[ 'kernel_size' ],
-                                training_parameters[ 'dropout_rate' ],
-                                hyperparameters[ 'activation_function' ], )
+    model = initialize_cartographer_model( )
     
     loss_fx = Spectrum_masked_negLogit( )
     

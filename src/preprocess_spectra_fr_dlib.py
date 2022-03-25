@@ -8,6 +8,7 @@ import numpy as np, pandas as pd
 import constants
 from masses import modseq_toModDict, ladder_mz_generator, mod_regex_keys
 from local_io import read_table
+from tensorize import modseq_to_codedseq
 #from .masses import *
 
 
@@ -81,7 +82,8 @@ def decompress_spectrum( record ):
 
 
 def dlib_row_parser( record, frag_type, nce, ):
-    modseq = modseq_renamer( str( record['PeptideModSeq'] ) )
+    modseq = str( record['PeptideModSeq'] )
+    
     mod_dict = modseq_toModDict( modseq )
     if len(mod_dict) > 0:
          print( 'Invalid modifications in ' + modseq )
@@ -94,7 +96,8 @@ def dlib_row_parser( record, frag_type, nce, ):
         return 0
     
     # Extract and label spectra
-    key_name = modseq+'_'+str(record['PrecursorCharge'])
+    codedseq = modseq_to_codedseq( modseq )
+    key_name = codedseq+'_'+str(record['PrecursorCharge'])
     mzs, ints = decompress_spectrum( record )
     predict_z = np.min( [ record['PrecursorCharge'], 3 ] )
     ion_mzs = ladder_mz_generator( record['PeptideModSeq'], charge=predict_z )

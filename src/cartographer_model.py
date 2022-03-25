@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 from core_layers import resnet_block
 
+from cartographer_settings import hyperparameters, training_parameters
+from tensorize import residues
+from constants import max_peptide_len, min_precursor_charge, max_precursor_charge
+
+
 class precursor_charge_embed( nn.Module ):
     def __init__( self, vec_length, n_charges, embed_dim, ):
         super().__init__()
@@ -87,3 +92,25 @@ class cartographer_hcd( cartographer_model ):
         x = self.encoder( seq, z, nce, )
         return self.hcd_decoder( x )
     
+
+def initialize_cartographer_model( frag_type = None, model_file = None, ):
+    if frag_type == 'beam':
+        cartographer = cartographer_hcd
+    elif frag_type == 'resonance':
+        cartographer = cartographer_cid
+    else:
+        cartographer = cartographer_model
+    
+    model = cartographer( max_peptide_len + 2,
+                          len( residues ) + 1, 
+                          max_precursor_charge - min_precursor_charge + 1,
+                          hyperparameters[ 'embed_dimension' ],
+                          hyperparameters[ 'nce_encode_dimension' ],
+                          hyperparameters[ 'n_resnet_blocks' ],
+                          hyperparameters[ 'kernel_size' ],
+                          training_parameters[ 'dropout_rate' ],
+                          hyperparameters[ 'activation_function' ], )
+    if model_file:
+        model.load_state_dict( torch.load( model_file ), strict=True, )
+    
+    return model

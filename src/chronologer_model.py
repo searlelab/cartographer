@@ -1,7 +1,10 @@
 
 import torch
 import torch.nn as nn
+from constants import max_peptide_len
+from tensorize import residues
 from core_layers import resnet_block
+from chronologer_settings import hyperparameters, training_parameters
 
 
 class chronologer_model( nn.Module ):
@@ -27,3 +30,15 @@ class chronologer_model( nn.Module ):
         x = self.flatten( x )
         return self.output( x )
         
+        
+def initialize_chronologer_model( model_file = None, ):
+    model = chronologer_model( max_peptide_len + 2,
+                               len( residues ) + 1,
+                               hyperparameters[ 'embed_dimension' ],
+                               hyperparameters[ 'n_resnet_blocks' ],
+                               hyperparameters[ 'kernel_size' ],
+                               training_parameters[ 'dropout_rate'],
+                               hyperparameters[ 'activation_function' ], )
+    if model_file:
+        model.load_state_dict( torch.load( model_file ), strict=True, )
+    return model

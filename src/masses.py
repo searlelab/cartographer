@@ -34,13 +34,16 @@ masses['x'] = masses['K'] + mod_masses['TMT10']
 
 
 
-def mass_calc( seq, initial_mass = 18.0105647, mods={}, mod_offset=0 ):
+def mass_calc( modseq, initial_mass = 18.0105647, mods={}, mod_offset=0, ):
+    mods.update( modseq_toModDict( modseq ) )
+    seq = modseq_to_seq( modseq )
     mass = initial_mass
     for i in range(len(seq)):
         mass += masses[seq[i]]
         if i+1+mod_offset in mods:
             mass += mods[i+1+mod_offset]
     return mass
+
 
 def mod_str_formatter(seq, mod_dict, start_site, end_site, mod_offset=0):
     output_str = ''
@@ -55,7 +58,7 @@ def mod_seq_generator(seq, mod_dict):
     mod_seq = ''
     start = 0
     for i in mod_dict:
-        mod = '['+str(mod_dict[i])+']'
+        mod = '['+format(mod_dict[i], '+f')+']'
         mod_seq = mod_seq + seq[start:i] + mod
         start = i
     mod_seq += seq[start:]
@@ -76,14 +79,14 @@ def modseq_to_seq( mod_seq ):
     return re.sub(r'\[.+?\]','',mod_seq)
 
 
-def ladder_mz_generator(mod_seq, charge=2, max_fragment_z=3, ):
+def ladder_mz_generator(mod_seq, charge=2, max_fragment_z=3, phos_loss=False, ):
     seq = modseq_to_seq( mod_seq )
     ## Identify modifications
     mods = modseq_toModDict(mod_seq)
 
     residue_masses = np.array( [ masses[a] for a in seq ] )
-    mod_masses = np.array( [ mods[m] if i+1 in mods else 0.0 
-                             for i in range(seq) ] )
+    mod_masses = np.array( [ mods[i] if i in mods else 0.0 
+                             for i in range(1,len(seq)+1) ] )
     residue_wMod_masses = residue_masses + mod_masses
     
     peptide_mass = mass_calc( seq, mods=mods )
@@ -91,19 +94,20 @@ def ladder_mz_generator(mod_seq, charge=2, max_fragment_z=3, ):
     frag_masses['b'] = np.cumsum( residue_wMod_masses[:-1] )
     frag_masses['y'] = peptide_mass - frag_masses['b'][::-1]
     
-    phos_loc = np.array( [ m == mod_masses['Phospho'] for m in mod_masses ] )
-    phos_mask = np.cumsum( phos_loc ) >= 1
-    b_phos_mask = phos_mask[:-1]
-    frag_masses['b-PO4'] = b_phos_mask *\
-                           (frag_masses['b'] - b_phos_mask*masses['Phospho'])
-    y_phos_mask = phos_mask[::-1][:-1]
-    frag_masses['y-PO4'] = y_phos_mask *\
-                           (frag_masses['y'] - y_phos_mask*masses['Phospho'])
+    if phos_loss:
+        phos_loc = np.array( [ m == mod_masses['Phospho'] for m in mod_masses ] )
+        phos_mask = np.cumsum( phos_loc ) >= 1
+        b_phos_mask = phos_mask[:-1]
+        frag_masses['b-PO4'] = b_phos_mask *\
+                            (frag_masses['b'] - b_phos_mask*masses['Phospho'])
+        y_phos_mask = phos_mask[::-1][:-1]
+        frag_masses['y-PO4'] = y_phos_mask *\
+                            (frag_masses['y'] - y_phos_mask*masses['Phospho'])
                            
     mz_array = []
-    for frag_type in frag_masses:
-        for frag_z in range( 1, max_fragment_z+1, ):
+    for frag_z in range( 1, max_fragment_z+1, ):
+        for frag_type in frag_masses:
             mzs = (frag_masses[frag_type]+p_mass*frag_z) / frag_z
             mzs = mzs * ( frag_z <= charge ) # Mask out impossible ions
             mz_array.append( mzs )
-    return mz_array # Current structure is (12, peplen-1)), consider flattening
+    return np.array( mz_array ) # Current structure is (12, peplen-1)), consider flattening

@@ -5,10 +5,10 @@ import numpy as np
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 from local_io import read_rt_database
-from constants import chronologer_db_loc, seed, validation_fraction, max_peptide_len 
-from chronologer_settings import hyperparameters, training_parameters
-from tensorize import hi_db_to_tensors, residues
-from chronologer_model import chronologer_model
+from constants import chronologer_db_loc, seed, validation_fraction
+from chronologer_settings import training_parameters
+from tensorize import hi_db_to_tensors
+from chronologer_model import initialize_chronologer_model
 from loss_functions import RT_masked_negLogL
 from training_loop import train_model
 
@@ -53,13 +53,7 @@ def train_chronologer( output_file_name, test_frac=validation_fraction, random_s
     print( 'Chronologer database successfully loaded' )
     datasets = split_train_test_data( chronologer_db, test_frac, random_seed )
     print('Training and testing data split')
-    model = chronologer_model( max_peptide_len + 2,
-                               len( residues ) + 1,
-                               hyperparameters[ 'embed_dimension' ],
-                               hyperparameters[ 'n_resnet_blocks' ],
-                               hyperparameters[ 'kernel_size' ],
-                               training_parameters[ 'dropout_rate'],
-                               hyperparameters[ 'activation_function' ], )
+    model = initialize_chronologer_model( )
     
     n_sources = len( set( chronologer_db.Source ) )
     loss_fx = RT_masked_negLogL( n_sources, )
