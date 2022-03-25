@@ -28,7 +28,7 @@ def peptide_generator( seq, protease = 'trypsin', miscleavages = 1, ):
     return sorted( peptides )
 
 
-def generate_peptidetoprotein( protein_dict, ):
+def generate_peptidetoprotein( protein_dict, decoys=False, ):
     dfs = []
     for accession, protein in protein_dict.items():
         peptides = peptide_generator( protein, )
@@ -36,6 +36,12 @@ def generate_peptidetoprotein( protein_dict, ):
                              'isDecoy' : False,
                              'ProteinAccession' : accession, } )
         dfs.append( df )
+        if decoys:
+            peptides = [ p[0]+p[1:-1][::-1]+p[-1] for p in peptides ]
+            df = pd.DataFrame( { 'PeptideSeq' : peptides,
+                                 'isDecoy' : True,
+                                 'ProteinAccession' : accession, } )
+            dfs.append( df )
     return pd.concat( dfs )
 
 
@@ -91,7 +97,8 @@ def build_library( fasta_file,
                    batch_size = 2048,
                    n_threads = 8,
                    device = 'cuda',
-                   print_checkpoint = 100000, ):
+                   print_checkpoint = 100000,
+                   add_decoys = False, ):
     
     start_time = time.time()
     
@@ -116,7 +123,8 @@ def build_library( fasta_file,
     
     # Read in protein sequences, extract peptides, apply modifications, and tensorize
     protein_sequences = read_fasta( fasta_file, )
-    peptide_to_protein = generate_peptidetoprotein( protein_sequences, )
+    peptide_to_protein = generate_peptidetoprotein( protein_sequences, add_decoys, )
+    
     ## NEED TO GET PEPTIDETOPROTEIN TABLE INTO DLIB ##
     unique_peptides = sorted( set( peptide_to_protein.PeptideSeq ) )
     modified_peptides = apply_mods( unique_peptides, 
