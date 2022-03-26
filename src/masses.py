@@ -85,24 +85,24 @@ def ladder_mz_generator(mod_seq, charge=2, max_fragment_z=3, phos_loss=False, ):
     mods = modseq_toModDict(mod_seq)
 
     residue_masses = np.array( [ masses[a] for a in seq ] )
-    mod_masses = np.array( [ mods[i] if i in mods else 0.0 
+    mod_mass_shifts = np.array( [ mods[i] if i in mods else 0.0 
                              for i in range(1,len(seq)+1) ] )
-    residue_wMod_masses = residue_masses + mod_masses
+    residue_wMod_shifts = residue_masses + mod_mass_shifts
     
     peptide_mass = mass_calc( seq, mods=mods )
     frag_masses = {}
-    frag_masses['b'] = np.cumsum( residue_wMod_masses[:-1] )
+    frag_masses['b'] = np.cumsum( residue_wMod_shifts[:-1] )
     frag_masses['y'] = peptide_mass - frag_masses['b'][::-1]
     
     if phos_loss:
-        phos_loc = np.array( [ m == mod_masses['Phospho'] for m in mod_masses ] )
+        phos_loc = np.array( [ m == mod_masses['Phospho'] for m in mod_mass_shifts ] )
         phos_mask = np.cumsum( phos_loc ) >= 1
         b_phos_mask = phos_mask[:-1]
         frag_masses['b-PO4'] = b_phos_mask *\
-                            (frag_masses['b'] - b_phos_mask*masses['Phospho'])
+                            (frag_masses['b'] - b_phos_mask*mod_masses['Phospho'])
         y_phos_mask = phos_mask[::-1][:-1]
         frag_masses['y-PO4'] = y_phos_mask *\
-                            (frag_masses['y'] - y_phos_mask*masses['Phospho'])
+                            (frag_masses['y'] - y_phos_mask*mod_masses['Phospho'])
                            
     mz_array = []
     for frag_z in range( 1, max_fragment_z+1, ):

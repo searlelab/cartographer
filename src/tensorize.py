@@ -42,7 +42,11 @@ def modseq_to_codedseq( seq ):
     else: seq = '-'+seq
     seq = seq+'_'    
     
-    return seq
+    # Ensure that there are no additional modifications
+    if seq.count('[') > 0:
+        return None
+    else:
+        return seq
 
 
 def codedseq_to_array(seq, max_size=max_peptide_len+2):

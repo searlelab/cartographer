@@ -6,9 +6,9 @@ import sys, argparse, re, sqlite3, zlib, pickle, concurrent
 import concurrent.futures
 import numpy as np, pandas as pd
 import constants
-from masses import modseq_toModDict, ladder_mz_generator, mod_regex_keys
+from masses import modseq_toModDict, ladder_mz_generator
 from local_io import read_table
-from tensorize import modseq_to_codedseq
+from tensorize import modseq_to_codedseq, mod_regex_keys
 #from .masses import *
 
 
@@ -54,17 +54,21 @@ def pad_array( array, n_ion_types=4, ): #peplen, precursor_z, ):
 
 
 def ion_array_matcher( search_mzs, mzs, ints, resolution='high',):
+    array_shape = search_mzs.shape
     search_ints = []
-    for s_mz in search_mzs:
-        idx = np.abs(mzs-s_mz).argmin()
-        mass_tolerance = constants.return_tolerance( s_mz, resolution, )
-        if np.abs(mzs[idx] - s_mz) <= mass_tolerance:
-            ion_int = ints[idx]
+    for s_mz in search_mzs.flatten():
+        if s_mz == 0.0: 
+            search_ints.append( 0.0 )
         else:
-            ion_int = 0.0
-        search_ints.append( ion_int )
+            idx = np.abs(mzs-s_mz).argmin()
+            mass_tolerance = constants.return_tolerance( s_mz, resolution, )
+            if np.abs(mzs[idx] - s_mz) <= mass_tolerance:
+                ion_int = ints[idx]
+            else:
+                ion_int = 0.0
+            search_ints.append( ion_int )
     norm_ints = np.array(search_ints) / ( np.max( search_ints ) + constants.epsilon )
-    return norm_ints
+    return np.reshape( norm_ints, array_shape, )
 
 
 
@@ -82,25 +86,22 @@ def decompress_spectrum( record ):
 
 
 def dlib_row_parser( record, frag_type, nce, ):
-    modseq = str( record['PeptideModSeq'] )
-    
-    mod_dict = modseq_toModDict( modseq )
-    if len(mod_dict) > 0:
-         print( 'Invalid modifications in ' + modseq )
-         return 0
-    
-    
     peptide_len = len( record['PeptideSeq'] ) 
     if peptide_len > constants.max_peptide_len or peptide_len < constants.min_peptide_len:
         print( modseq + ' outside valid size range' )
         return 0
     
     # Extract and label spectra
+    modseq = str( record['PeptideModSeq'] )
     codedseq = modseq_to_codedseq( modseq )
+    if not codedseq:
+         print( 'Invalid modifications in ' + modseq )
+         return 0
+
     key_name = codedseq+'_'+str(record['PrecursorCharge'])
     mzs, ints = decompress_spectrum( record )
     predict_z = np.min( [ record['PrecursorCharge'], 3 ] )
-    ion_mzs = ladder_mz_generator( record['PeptideModSeq'], charge=predict_z )
+    ion_mzs = ladder_mz_generator( record['PeptideModSeq'], charge=predict_z, phos_loss=True, )
     
     
     norm_ints = ion_array_matcher( ion_mzs, mzs, ints, )
@@ -140,7 +141,7 @@ def main( ):
                  open( args.output_file, 'wb' ) )
     
 
+
 if __name__ == "__main__":
     main()
-
-
+    sys.exit()
