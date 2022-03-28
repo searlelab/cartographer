@@ -83,7 +83,7 @@ class cartographer_model( nn.Module ):
 
 class cartographer_cid( cartographer_model ):
     def forward( self, seq, z, ):
-        x = self.encoder( seq, z, torch.zeros(z.shape), )
+        x = self.encoder( seq, z, torch.zeros(z.size(0).unsqueeze(-1)), )
         return self.cid_decoder( x )
 
 
@@ -112,5 +112,5 @@ def initialize_cartographer_model( frag_type = None, model_file = None, ):
                           hyperparameters[ 'activation_function' ], )
     if model_file:
         model.load_state_dict( torch.load( model_file ), strict=True, )
-    
+    model.eval()
     return model
