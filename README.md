@@ -1,6 +1,5 @@
-# Cartographer (beta)
-Spectral library predictor based off of Chronologer
-early beta used with XXX
+# Cartographer (Alpha)
+Spectral library predictor based off of the Chronologer model (https://github.com/searlelab/chronologer)
 
 Cartographer has been verified to work under the following environment:
 | Package | Version |
