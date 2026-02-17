@@ -15,7 +15,8 @@ def generate_outlier_mask( array, distribution, fdr, ):
 
 
 def l2_norm( vector, eps=epsilon, ):
-    sum_sqs = torch.sum( vector**2, dim=(1,-1), keepdims=True, )
+    reduce_dims = tuple( range( 1, vector.ndim ) )
+    sum_sqs = torch.sum( vector**2, dim=reduce_dims, keepdims=True, )
     denom = torch.sqrt( sum_sqs.clamp( eps, ) )
     #print( vector.shape, sum_sqs.shape, denom.shape, )
     return vector / denom
@@ -56,7 +57,8 @@ class Spectrum_masked_negLogit( nn.Module ):
         true_masked = true * ion_mask
         pred_norm = l2_norm( pred_masked, eps, )
         true_norm = l2_norm( true_masked, eps, )
-        product = torch.sum( pred_norm * true_norm, dim=(1,-1), )
+        reduce_dims = tuple( range( 1, pred_norm.ndim ) )
+        product = torch.sum( pred_norm * true_norm, dim=reduce_dims, )
         score = neg_logit( product, )
         
         outlier_mask = generate_outlier_mask( score, 'gumbel', self.fdr, )

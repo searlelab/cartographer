@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from core_layers import resnet_block
 
-from cartographer_settings import hyperparameters, training_parameters
+from cartographer_settings import hyperparameters, training_parameters, ms2_vector_len
+import cartographer_settings
 from tensorize import residues
 from constants import max_peptide_len, min_precursor_charge, max_precursor_charge
 
@@ -32,18 +33,18 @@ class nce_embed( nn.Module ):
         return self.embed_dim2( x )
 
 class cartographer_model( nn.Module ):
-    def __init__( self, vec_length, n_states, n_charges, embed_dim, nce_dim, n_blocks, kernel, drop_rate, act_fx, ):
+    def __init__( self, vec_length, n_states, n_charges, embed_dim, nce_dim, n_blocks, kernel, drop_rate, act_fx, n_ion_channels=6, ):
         super().__init__()
         self.seq_embed = nn.Embedding( n_states, embed_dim, padding_idx=0, )
         self.charge_embed = precursor_charge_embed( vec_length, n_charges, embed_dim, )
         self.nce_embed = nce_embed( vec_length, embed_dim, nce_dim, )
-        self.resnet_blocks = nn.Sequential( *[ resnet_block( embed_dim, 
+        self.resnet_blocks = nn.Sequential( *[ resnet_block( embed_dim,
                                                              embed_dim,
-                                                             kernel, 
-                                                             d+1, 
+                                                             kernel,
+                                                             d+1,
                                                              act_fx, ) for d in range(n_blocks) ] )
         self.dropout = nn.Dropout( drop_rate )
-        self.hcd_conv = nn.Conv1d( embed_dim, 4, kernel_size=4, )
+        self.hcd_conv = nn.Conv1d( embed_dim, n_ion_channels, kernel_size=4, )
         self.cid_conv = nn.Conv1d( embed_dim, 4, kernel_size=4, )
         
     
@@ -64,7 +65,8 @@ class cartographer_model( nn.Module ):
     
     def hcd_decoder( self, x, ):
         x = self.hcd_conv( x )
-        return self.normalize( x )
+        x = self.normalize( x )
+        return x.flatten( 1 )[ :, :ms2_vector_len ]
     
     def cid_decoder( self, x, ):
         x = self.cid_conv( x )
@@ -100,17 +102,18 @@ def initialize_cartographer_model( frag_type = None, model_file = None, ):
         cartographer = cartographer_cid
     else:
         cartographer = cartographer_model
-    
-    model = cartographer( max_peptide_len + 2,
-                          len( residues ) + 1, 
+
+    model = cartographer( cartographer_settings.max_peptide_len + 2,
+                          len( residues ) + 1,
                           max_precursor_charge - min_precursor_charge + 1,
                           hyperparameters[ 'embed_dimension' ],
                           hyperparameters[ 'nce_encode_dimension' ],
                           hyperparameters[ 'n_resnet_blocks' ],
                           hyperparameters[ 'kernel_size' ],
                           training_parameters[ 'dropout_rate' ],
-                          hyperparameters[ 'activation_function' ], )
+                          hyperparameters[ 'activation_function' ],
+                          cartographer_settings.n_ion_channels, )
     if model_file:
         model.load_state_dict( torch.load( model_file ), strict=True, )
-    
+
     return model

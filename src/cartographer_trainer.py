@@ -1,19 +1,64 @@
-import os, sys, pickle, random, re, argparse
+import os, sys, argparse
 from datetime import datetime
 import numpy as np
+
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
-from cartographer_settings import training_parameters
-from tensorize import codedseq_to_array
+from cartographer_settings import training_parameters, progress_tick_rows, max_peptide_len
 from cartographer_model import initialize_cartographer_model
 from loss_functions import Spectrum_masked_negLogit
-from training_loop import train_model
-from constants import cartographer_ptdata_loc, seed, validation_fraction, max_peptide_len, min_precursor_charge, max_precursor_charge
-
+from training_loop import train_model, resolve_device
+from prospect_loader import ProspectMS2Dataset, discover_split_files
+from tensorize import codedseq_to_array
 
 import torch
-from torch.utils.data import TensorDataset
 
+
+PRTC_PEPTIDES = [ 'SSAAPPPPPR', 'GISNEGQNASIK', 'HVLTSIGEK', 'DIPVPKPK',
+                  'IGDYAGIK', 'TASEFDSAIAQDK', 'SAAGAFGPELSR', 'ELGQSGVDTYLQTK',
+                  'GLILVGGYGTR', 'GILFVGSGVSGGEEGAR', 'SFANQPLEVVYSK',
+                  'LTILEELR', 'NGFILDGFPR', 'ELASGLSFPVGFK', 'LSSEAPALFQFDLK', ]
+
+PRTC_NCE = 0.33   # NCE 33, normalized /100
+PRTC_CHARGE = 2    # +2H, one-hot index 1
+
+
+def build_prtc_inputs( device ):
+    """Pre-build PRTC peptide tensors for inference."""
+    seq_size = max_peptide_len + 2
+    n = len( PRTC_PEPTIDES )
+
+    seq_arrays = []
+    for pep in PRTC_PEPTIDES:
+        coded = '-' + pep + '_'
+        seq_arrays.append( codedseq_to_array( coded, max_size=seq_size ) )
+
+    seq_t = torch.from_numpy( np.array( seq_arrays, 'int64' ) ).to( device )
+    charge_t = torch.zeros( n, 6, device=device )
+    charge_t[ :, PRTC_CHARGE - 1 ] = 1.0
+    nce_t = torch.full( (n, 1), PRTC_NCE, device=device )
+
+    return seq_t, charge_t, nce_t
+
+
+def make_prtc_callback( prtc_file, device ):
+    """Return a callback that writes PRTC predictions to TSV after each epoch."""
+    device = resolve_device( device )
+    seq_t, charge_t, nce_t = build_prtc_inputs( device )
+
+    def callback( model, epoch ):
+        model.to( device )
+        model.eval()
+        with torch.no_grad():
+            pred = model( seq_t, charge_t, nce_t )
+        pred_np = pred.cpu().numpy()
+
+        with open( prtc_file, 'a' ) as f:
+            for i, pep in enumerate( PRTC_PEPTIDES ):
+                vals = '\t'.join( format( v, '.6f' ) for v in pred_np[i] )
+                f.write( str(epoch) + '\t' + pep + '\t' + vals + '\n' )
+
+    return callback
 
 
 def parse_args(args):
@@ -21,6 +66,10 @@ def parse_args(args):
     timestamp = datetime.now().strftime( '%Y%m%d%H%M%S' )
     default_out_filename = 'Cartographer_'+timestamp+'.pt'
     parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset_root',
+                        type=str,
+                        required=True,
+                        help='Path to prospect-ptms-ms2 dataset directory')
     parser.add_argument('--output_file',
                         type=str,
                         help='Model filename',
@@ -29,123 +78,81 @@ def parse_args(args):
                         type=str,
                         help='Directory to save model (default is Cartographer/models)',
                         default=os.path.join(src_dir,'..','models'))
+    parser.add_argument('--device',
+                        type=str,
+                        help='Device for training {auto, mps, cuda, cpu}',
+                        default='auto')
+    parser.add_argument('--num_workers',
+                        type=int,
+                        help='DataLoader workers (default 0)',
+                        default=0)
+    parser.add_argument('--prtc_report',
+                        type=str,
+                        help='TSV file to log PRTC peptide predictions each epoch',
+                        default=None)
     return parser.parse_args(args)
 
 
-def load_data( data_dir, ): ## WILL NEED TO FIX WITH SPLIT_TRAIN_TEST_DATA
-    files = [ f for f in os.listdir(data_dir) if f[-4:] == '.pkl' ]
-    data = {}
-    for f in files:
-        ## NAMING SCHEME: FILE NAMES ARE DATASET, FRAGMENTATION TYPE, AND NCE SEPARATED BY _
-        dataset, frag_type, nce = f.split('_')[:3]
-        nce = float( nce )    
-        
-        f_data = pickle.load( open( os.path.join( data_dir, f ) ,'rb') )
-        f_data = dict( [ i for i in f_data.items()
-                       if len(i[0][0][1:-1]) <= max_peptide_len and
-                          int(i[0][1]) >= min_precursor_charge and 
-                          int(i[0][1]) <= max_precursor_charge ] )
-        ## NEW FILTER ON LADDER ION NUMBER
-        f_data = dict( [ i for i in f_data.items()
-                       if np.sum(i[1]['ion_array'] >= 0.01) >= 3 ] )
-        data[(dataset,frag_type,nce)] = f_data
-        
-    return data
-      
-        
-
-def split_train_test_data( data, test_frac, random_seed, ): # NEED TO FIX INPUTS
-    proc_data = dict( [ (d,dict([ (v,[[],[],[],[]]) for v in ['x','y','w'] ])) for d in ['train','test'] ] )
-    random.seed( random_seed )
-    for d in data:
-        data_set, frag_type, nce = d
-        
-        all_keys = list( data[d] )
-        random.shuffle( all_keys )
-        test_idx = int( np.round( len(all_keys)*test_frac ) )
-        keys = { 'train' : all_keys[test_idx:],
-                 'test'  : all_keys[:test_idx] }
-        
-        ## EVENTUALLY NEED TO MOVE THIS CODE TO TENSORIZE
-        ## LEAVE HERE FOR NOW FOR TESTING PURPOSES
-        ## PROBABLY RE-ORGANIZE SO THAT IT IS ALREADY IN TENSOR FORM
-        ## WHEN IT COMES INTO TRAIN-TEST SPLIT
-        
-        for data_type in keys:
-            seq_array = [ codedseq_to_array( re.sub(r'\[.+?\]',
-                                          '',
-                                          data[d][x]['peptide_mod_seq'] ) ) 
-                      for x in keys[data_type] ]
-            pz_array = [ [1 if data[d][x]['precursor_z'] == z else 0 
-                        for z in range(min_precursor_charge,max_precursor_charge+1)] for x in keys[data_type] ]
-        
-            frag_array = [ [ 1 if frag_type == 'HCD' else 0 ] 
-                        for _ in keys[data_type] ]
-            nce_array = [ [ float(nce) if frag_type == 'HCD' else 0.0 ] 
-                        for _ in keys[data_type] ]
-        
-            weights = [ [ 1.0 ] for _ in keys[data_type] ]
-            
-            intensities = [ list(data[d][x]['ion_array']) for x in keys[data_type] ]
-        
-            proc_data[data_type]['x'][0] += seq_array
-            proc_data[data_type]['x'][1] += pz_array #features
-            proc_data[data_type]['x'][2] += nce_array
-            proc_data[data_type]['x'][3] += frag_array
-            proc_data[data_type]['y'][0] += intensities
-            proc_data[data_type]['w'][0] += weights
-            
-    for data_type in proc_data:
-        proc_data[data_type]['x'] = [ torch.Tensor( np.array(x) ) for x in proc_data[data_type]['x'] ]
-        proc_data[data_type]['x'][0] = proc_data[data_type]['x'][0].to( torch.int64 )
-        #data[data_type]['x'][1] = data[data_type]['x'][1].to( torch.int64 )
-        proc_data[data_type]['x'][3] = proc_data[data_type]['x'][3].to( torch.bool  )
-        proc_data[data_type]['y'] = torch.Tensor( np.array( proc_data[data_type]['y'][0] ) )
-        #norm_weights = np.array( data[data_type]['w'][0] ) / np.mean( data[data_type]['w'][0] )
-        #print( norm_weights )
-        proc_data[data_type]['w'] = torch.Tensor( np.array( proc_data[data_type]['w'][0] ) )
-    #print( proc_data['train']['x'] )
-    #print( proc_data['train']['y'] )
-    #print( proc_data['train']['w'] )
-    datasets = dict( [ (dt, TensorDataset( *proc_data[dt]['x'], proc_data[dt]['y'], proc_data[dt]['w'] ) ) 
-                    for dt in proc_data ] ) 
-        
-    return datasets
-
-
-def train_cartographer( output_file_name, test_frac=validation_fraction, random_seed = seed, ):
-    # Prepare data
+def train_cartographer( dataset_root, output_file_name, device='auto', num_workers=0, prtc_report=None, ):
     print( 'Cartographer training initiated' )
-    data = load_data( cartographer_ptdata_loc )
-    print( 'Cartographer PT data loaded' )
-    datasets = split_train_test_data( data, test_frac, random_seed )
-    print( 'Training and testing data split' )
-    model = initialize_cartographer_model( )
-    
+
+    # Discover pre-split parquet shards
+    train_files = discover_split_files( dataset_root, 'train' )
+    test_files = discover_split_files( dataset_root, 'test' )
+    print( 'Found ' + str(len(train_files)) + ' train shards, ' +
+           str(len(test_files)) + ' test shards' )
+    assert len(train_files) > 0, 'No train parquet files found in ' + dataset_root
+    assert len(test_files) > 0, 'No test parquet files found in ' + dataset_root
+
+    datasets = { 'train' : ProspectMS2Dataset( train_files, shuffle_files=True ),
+                 'test'  : ProspectMS2Dataset( test_files,  shuffle_files=False ), }
+    print( 'Datasets created' )
+
+    model = initialize_cartographer_model( frag_type='beam' )
+
     loss_fx = Spectrum_masked_negLogit( )
-    
+
     parameters = list(model.parameters())
     optimizer = training_parameters[ 'optimizer' ]( parameters,
                                                     lr = training_parameters[ 'learning_rate' ], )
-    
+
+    # Override device from settings if specified via CLI
+    train_device = device
+    eval_device = device
+
+    # PRTC report callback
+    epoch_callback = None
+    if prtc_report is not None:
+        # Truncate file and write header
+        with open( prtc_report, 'w' ) as f:
+            f.write( 'epoch\tpeptide\t' + '\t'.join( 'i' + str(i) for i in range(174) ) + '\n' )
+        epoch_callback = make_prtc_callback( prtc_report, device )
+        print( 'PRTC report: ' + prtc_report )
+
     print( 'Ready to begin Cartographer training' )
-    final_loss = train_model( model, 
-                              datasets, 
-                              training_parameters[ 'initial_batch_size' ], 
-                              training_parameters[ 'max_batch_size' ], 
+    final_loss = train_model( model,
+                              datasets,
+                              training_parameters[ 'initial_batch_size' ],
+                              training_parameters[ 'max_batch_size' ],
                               training_parameters[ 'epochs_to_2x_batch' ],
-                              loss_fx, 
+                              loss_fx,
                               optimizer,
-                              training_parameters[ 'n_epochs'], 
-                              training_parameters[ 'train_device' ], 
-                              training_parameters[ 'eval_device' ],
-                              output_file_name, )
+                              training_parameters[ 'n_epochs'],
+                              train_device,
+                              eval_device,
+                              output_file_name,
+                              progress_tick_rows=progress_tick_rows,
+                              num_workers=num_workers,
+                              epoch_callback=epoch_callback, )
     return final_loss
-    
+
 def main():
     args = parse_args(sys.argv[1:])
     model_out_file = os.path.join( args.output_dir, args.output_file, )
-    train_cartographer( model_out_file, )
+    os.makedirs( args.output_dir, exist_ok=True )
+    train_cartographer( args.dataset_root, model_out_file,
+                        device=args.device, num_workers=args.num_workers,
+                        prtc_report=args.prtc_report, )
 
 
 if __name__ == "__main__":

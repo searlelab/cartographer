@@ -10,8 +10,9 @@ masses = { 'A':71.037113805,  'C':103.009184505, 'D':115.026943065, 'E':129.0425
 
 mod_masses = { 'H2O' : 18.0105647, 'NH3' : 17.0265491,
                'CAM' : 57.0214635, 'Ox' : 15.994915, 'Phospho' : 79.966331,
-               'Ac' : 42.010565, 'Me' : 14.01565, 'Succ' : 100.016044, 
-               'Ub' : masses['G']*2, 'TMT0' : 224.152478, 'TMT10' : 229.162932, }
+               'Ac' : 42.010565, 'Me' : 14.01565, 'Succ' : 100.016044,
+               'Ub' : masses['G']*2, 'TMT0' : 224.152478, 'TMT10' : 229.162932,
+               'Deamid' : 0.984016, 'HexNAc' : 203.079373, }
 
 # Modified residues
 masses['c'] = masses['C'] + mod_masses['CAM']
@@ -31,6 +32,13 @@ masses['q'] = masses['R'] + mod_masses['Me']
 masses['r'] = masses['R'] + mod_masses['Me']*2
 masses['z'] = masses['K'] + mod_masses['TMT0']
 masses['x'] = masses['K'] + mod_masses['TMT10']
+masses['w'] = masses['W'] + mod_masses['Ox']
+masses['f'] = masses['N'] + mod_masses['Deamid']
+masses['g'] = masses['Q'] + mod_masses['Deamid']
+masses['h'] = masses['N'] + mod_masses['HexNAc']
+masses['i'] = masses['S'] + mod_masses['HexNAc']
+masses['j'] = masses['T'] + mod_masses['HexNAc']
+masses['k'] = masses['R'] + mod_masses['Deamid']
 
 
 
