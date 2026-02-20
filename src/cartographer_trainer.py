@@ -90,10 +90,23 @@ def parse_args(args):
                         type=str,
                         help='TSV file to log PRTC peptide predictions each epoch',
                         default=None)
+    parser.add_argument('--model_file',
+                        type=str,
+                        help='Path to a .pt state dict to resume from (default: train from scratch)',
+                        default=None)
+    parser.add_argument('--start_epoch',
+                        type=int,
+                        help='Epoch number to begin at (default: 1)',
+                        default=1)
+    parser.add_argument('--n_epochs',
+                        type=int,
+                        help='Total epoch count, overrides settings (default: use training_parameters)',
+                        default=None)
     return parser.parse_args(args)
 
 
-def train_cartographer( dataset_root, output_file_name, device='auto', num_workers=0, prtc_report=None, ):
+def train_cartographer( dataset_root, output_file_name, device='auto', num_workers=0,
+                        prtc_report=None, model_file=None, start_epoch=1, n_epochs=None, ):
     print( 'Cartographer training initiated' )
 
     # Discover pre-split parquet shards
@@ -108,7 +121,7 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
                  'test'  : ProspectMS2Dataset( test_files,  shuffle_files=False ), }
     print( 'Datasets created' )
 
-    model = initialize_cartographer_model( frag_type='beam' )
+    model = initialize_cartographer_model( frag_type='beam', model_file=model_file )
 
     loss_fx = Spectrum_masked_negLogit( )
 
@@ -129,6 +142,8 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
         epoch_callback = make_prtc_callback( prtc_report, device )
         print( 'PRTC report: ' + prtc_report )
 
+    num_epochs = n_epochs if n_epochs is not None else training_parameters[ 'n_epochs' ]
+
     print( 'Ready to begin Cartographer training' )
     final_loss = train_model( model,
                               datasets,
@@ -137,22 +152,35 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
                               training_parameters[ 'epochs_to_2x_batch' ],
                               loss_fx,
                               optimizer,
-                              training_parameters[ 'n_epochs'],
+                              num_epochs,
                               train_device,
                               eval_device,
                               output_file_name,
                               progress_tick_rows=progress_tick_rows,
                               num_workers=num_workers,
-                              epoch_callback=epoch_callback, )
+                              epoch_callback=epoch_callback,
+                              start_epoch=start_epoch, )
     return final_loss
 
 def main():
     args = parse_args(sys.argv[1:])
     model_out_file = os.path.join( args.output_dir, args.output_file, )
     os.makedirs( args.output_dir, exist_ok=True )
+
+    # Safety check: prevent overwriting the source model
+    if args.model_file is not None:
+        if os.path.abspath( model_out_file ) == os.path.abspath( args.model_file ):
+            print( 'Error: --output_file resolves to the same path as --model_file ('
+                   + os.path.abspath( model_out_file ) + '). '
+                   'Use a different output filename to avoid overwriting the source model.' )
+            sys.exit(1)
+
     train_cartographer( args.dataset_root, model_out_file,
                         device=args.device, num_workers=args.num_workers,
-                        prtc_report=args.prtc_report, )
+                        prtc_report=args.prtc_report,
+                        model_file=args.model_file,
+                        start_epoch=args.start_epoch,
+                        n_epochs=args.n_epochs, )
 
 
 if __name__ == "__main__":
