@@ -103,7 +103,8 @@ def parse_args(args):
 
 
 def train_electrician( dataset_root, output_file_name, device='auto', num_workers=0,
-                       prtc_report=None, patience=None, model_file=None, start_epoch=1, n_epochs=None, ):
+                       prtc_report=None, patience=None, model_file=None, start_epoch=1, n_epochs=None,
+                       arch_overrides=None, ):
     print( 'Electrician training initiated' )
 
     # Discover pre-split parquet shards
@@ -118,7 +119,8 @@ def train_electrician( dataset_root, output_file_name, device='auto', num_worker
                  'test'  : ProspectChargeDataset( test_files,  shuffle_files=False ), }
     print( 'Datasets created' )
 
-    model = initialize_electrician_model( model_file=model_file )
+    model = initialize_electrician_model( model_file=model_file,
+                                          arch_overrides=arch_overrides )
 
     loss_fx = ChargeDistribution_CrossEntropy( )
 

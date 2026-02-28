@@ -4,6 +4,14 @@ from datetime import datetime
 from electrician_trainer import train_electrician
 
 
+MULTISTART_ARCH = { 'embed_dim' : 24,
+                    'n_blocks' : 3,
+                    'kernel' : 5,
+                    'dilation_schedule' : [ 1, 4, 8 ],
+                    'block_variant' : 'full',
+                    'bottleneck_ratio' : 0.5, }
+
+
 def parse_args( args ):
     src_dir = os.path.dirname( os.path.abspath( __file__ ) )
     timestamp = datetime.now().strftime( '%Y%m%d%H%M%S' )
@@ -67,13 +75,15 @@ def main():
         print( '\n' + '=' * 60 )
         print( 'MULTI-START RUN ' + str(run) + ' of ' + str(n_starts) )
         print( '=' * 60 + '\n' )
+        print( 'Architecture override: ' + str(MULTISTART_ARCH) + '\n' )
 
         run_loss = train_electrician( args.dataset_root,
                                       run_file,
                                       device=args.device,
                                       num_workers=args.num_workers,
                                       prtc_report=args.prtc_report,
-                                      patience=args.patience, )
+                                      patience=args.patience,
+                                      arch_overrides=MULTISTART_ARCH, )
 
         print( '\nRun ' + str(run) + ' best test loss: ' + format( run_loss, '.6f' ) )
 

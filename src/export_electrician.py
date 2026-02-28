@@ -41,6 +41,46 @@ def build_preprocessing_metadata( model_file ):
 	return metadata
 
 
+def parse_dilation_schedule( raw_value ):
+	"""Parse a comma-delimited dilation schedule string into a list of ints."""
+	if raw_value is None:
+		return None
+	value = raw_value.strip()
+	if value == '':
+		return None
+	parts = [ part.strip() for part in value.split( ',' ) if part.strip() != '' ]
+	if len( parts ) == 0:
+		return None
+	try:
+		dilations = [ int(part) for part in parts ]
+	except ValueError as exc:
+		raise ValueError( 'dilation_schedule must be a comma-separated list of integers' ) from exc
+	if min( dilations ) < 1:
+		raise ValueError( 'dilation_schedule values must be >= 1' )
+	return dilations
+
+
+def build_arch_overrides( args ):
+	"""Build optional architecture override dict from CLI args."""
+	arch = {}
+	if args.embed_dim is not None:
+		arch[ 'embed_dim' ] = int( args.embed_dim )
+	if args.n_blocks is not None:
+		arch[ 'n_blocks' ] = int( args.n_blocks )
+	if args.kernel is not None:
+		arch[ 'kernel' ] = int( args.kernel )
+	if args.block_variant is not None:
+		arch[ 'block_variant' ] = args.block_variant
+	if args.bottleneck_ratio is not None:
+		arch[ 'bottleneck_ratio' ] = float( args.bottleneck_ratio )
+	dilation_schedule = parse_dilation_schedule( args.dilation_schedule )
+	if dilation_schedule is not None:
+		arch[ 'dilation_schedule' ] = dilation_schedule
+	if len( arch ) == 0:
+		return None
+	return arch
+
+
 def build_example_inputs( batch_size=2 ):
 	"""Build example inputs for tracing the model."""
 	seq_len = max_peptide_len + 2
@@ -97,6 +137,18 @@ def parse_args( args ):
 	                     help='Path to trained .pt state dict file' )
 	parser.add_argument( '--output_dir', type=str, default=None,
 	                     help='Output directory (default: same as model_file)' )
+	parser.add_argument( '--embed_dim', type=int, default=None,
+	                     help='Override embedding dimension for model construction' )
+	parser.add_argument( '--n_blocks', type=int, default=None,
+	                     help='Override number of residual blocks when dilation_schedule is not provided' )
+	parser.add_argument( '--kernel', type=int, default=None,
+	                     help='Override residual convolution kernel size' )
+	parser.add_argument( '--dilation_schedule', type=str, default=None,
+	                     help='Comma-separated dilation schedule override (e.g., "1,4,8")' )
+	parser.add_argument( '--block_variant', type=str, default=None, choices=[ 'full', 'k_only', 'bottleneck' ],
+	                     help='Residual block variant override' )
+	parser.add_argument( '--bottleneck_ratio', type=float, default=None,
+	                     help='Bottleneck ratio override (used when block_variant=bottleneck)' )
 	parser.add_argument( '--skip_validation', action='store_true',
 	                     help='Skip TorchScript validation' )
 	return parser.parse_args( args )
@@ -117,10 +169,15 @@ def main():
 	base_name = os.path.splitext( os.path.basename( model_file ) )[0]
 	ts_path   = os.path.join( output_dir, base_name + '.torchscript.pt' )
 	json_path = os.path.join( output_dir, base_name + '.preprocessing.json' )
+	arch_overrides = build_arch_overrides( args )
 
 	# Load model
 	print( 'Loading model from ' + model_file )
-	model = initialize_electrician_model( model_file=model_file )
+	if arch_overrides is not None:
+		print( 'Using architecture overrides: ' + json.dumps( arch_overrides ) )
+	model = initialize_electrician_model( model_file=model_file,
+	                                     arch_overrides=arch_overrides,
+	                                     map_location='cpu' )
 	model.eval()
 
 	# Export TorchScript
@@ -128,6 +185,8 @@ def main():
 
 	# Write preprocessing metadata
 	metadata = build_preprocessing_metadata( model_file )
+	if arch_overrides is not None:
+		metadata[ 'architecture_overrides' ] = arch_overrides
 	with open( json_path, 'w' ) as f:
 		json.dump( metadata, f, indent=2 )
 	print( 'Preprocessing metadata saved to ' + json_path )
