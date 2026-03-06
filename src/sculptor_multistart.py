@@ -1,7 +1,9 @@
 import argparse
+import concurrent.futures
 import csv
 import datetime
 import json
+import multiprocessing as mp
 import os
 import shutil
 import sys
@@ -137,6 +139,10 @@ def parse_args( args ):
                          type=int,
                          default=3,
                          help='Independent starts per architecture design' )
+    parser.add_argument( '--parallel_jobs',
+                         type=int,
+                         default=1,
+                         help='Number of starts to train concurrently per design' )
     parser.add_argument( '--designs_file',
                          type=str,
                          default=None,
@@ -157,6 +163,32 @@ def parse_args( args ):
                          action='store_true',
                          help='Print planned runs and exit without training' )
     return parser.parse_args( args )
+
+
+def run_training_job( job ):
+    try:
+        metrics = train_sculptor( job[ 'dataset_root' ],
+                                  job[ 'checkpoint' ],
+                                  device=job[ 'device' ],
+                                  num_workers=job[ 'num_workers' ],
+                                  patience=job[ 'patience' ],
+                                  model_file=None,
+                                  start_epoch=1,
+                                  n_epochs=job[ 'n_epochs' ],
+                                  arch_overrides=job[ 'arch' ],
+                                  metadata_file=job[ 'metadata_file' ],
+                                  eval_batch_size=job[ 'eval_batch_size' ] )
+
+        return { 'status' : 'ok',
+                 'run' : job[ 'run' ],
+                 'checkpoint' : job[ 'checkpoint' ],
+                 'metrics' : metrics, }
+    except Exception as exc:
+        return { 'status' : 'failed',
+                 'run' : job[ 'run' ],
+                 'checkpoint' : job[ 'checkpoint' ],
+                 'error' : str( exc ),
+                 'traceback' : traceback.format_exc(), }
 
 
 def write_leaderboard( winners, path ):
@@ -184,6 +216,8 @@ def write_leaderboard( winners, path ):
 
 def main():
     args = parse_args( sys.argv[1:] )
+    if args.parallel_jobs < 1:
+        raise ValueError( '--parallel_jobs must be >= 1' )
 
     timestamp = datetime.datetime.now().strftime( '%Y%m%d_%H%M%S' )
     if args.output_dir is None:
@@ -206,6 +240,7 @@ def main():
     print( 'Dataset root: ' + args.dataset_root )
     print( 'Design count: ' + str(len(designs)) )
     print( 'Starts per design: ' + str(args.n_starts) )
+    print( 'Parallel jobs per design: ' + str(args.parallel_jobs) )
     print( 'Run directory: ' + run_dir )
 
     if args.dry_run:
@@ -228,52 +263,112 @@ def main():
         print( '=' * 72 )
 
         best_row = None
+        design_rows = []
 
+        jobs = []
         for run in range( 1, args.n_starts + 1 ):
             run_ckpt = os.path.join( checkpoints_dir,
                                      design_name + '__run' + str(run).zfill(2) + '.pt' )
+            jobs.append( { 'run' : run,
+                           'checkpoint' : run_ckpt,
+                           'dataset_root' : args.dataset_root,
+                           'device' : args.device,
+                           'num_workers' : args.num_workers,
+                           'patience' : args.patience,
+                           'n_epochs' : args.n_epochs,
+                           'arch' : arch,
+                           'metadata_file' : args.metadata_file,
+                           'eval_batch_size' : args.eval_batch_size, } )
 
-            row = { 'design_name' : design_name,
-                    'design_index' : design_ix,
-                    'run' : run,
-                    'status' : 'ok',
-                    'error' : '',
-                    'best_test_loss' : '',
-                    'test_mae_ccs' : '',
-                    'test_rmse_ccs' : '',
-                    'n_test' : '',
-                    'checkpoint' : run_ckpt,
-                    'arch_json' : json.dumps( arch, sort_keys=True ), }
+        if args.parallel_jobs == 1:
+            for job in jobs:
+                print( 'Run ' + str(job[ 'run' ]) + ' of ' + str(args.n_starts) + ' for ' + design_name )
 
-            print( 'Run ' + str(run) + ' of ' + str(args.n_starts) + ' for ' + design_name )
+                result = run_training_job( job )
+                row = { 'design_name' : design_name,
+                        'design_index' : design_ix,
+                        'run' : job[ 'run' ],
+                        'status' : result[ 'status' ],
+                        'error' : '',
+                        'best_test_loss' : '',
+                        'test_mae_ccs' : '',
+                        'test_rmse_ccs' : '',
+                        'n_test' : '',
+                        'checkpoint' : job[ 'checkpoint' ],
+                        'arch_json' : json.dumps( arch, sort_keys=True ), }
 
-            try:
-                metrics = train_sculptor( args.dataset_root,
-                                          run_ckpt,
-                                          device=args.device,
-                                          num_workers=args.num_workers,
-                                          patience=args.patience,
-                                          model_file=None,
-                                          start_epoch=1,
-                                          n_epochs=args.n_epochs,
-                                          arch_overrides=arch,
-                                          metadata_file=args.metadata_file,
-                                          eval_batch_size=args.eval_batch_size )
+                if result[ 'status' ] == 'ok':
+                    metrics = result[ 'metrics' ]
+                    row[ 'best_test_loss' ] = format( float(metrics[ 'best_test_loss' ]), '.8f' )
+                    row[ 'test_mae_ccs' ] = format( float(metrics[ 'test_mae' ]), '.8f' )
+                    row[ 'test_rmse_ccs' ] = format( float(metrics[ 'test_rmse' ]), '.8f' )
+                    row[ 'n_test' ] = int( metrics[ 'n_test' ] )
 
-                row[ 'best_test_loss' ] = format( float(metrics[ 'best_test_loss' ]), '.8f' )
-                row[ 'test_mae_ccs' ] = format( float(metrics[ 'test_mae' ]), '.8f' )
-                row[ 'test_rmse_ccs' ] = format( float(metrics[ 'test_rmse' ]), '.8f' )
-                row[ 'n_test' ] = int( metrics[ 'n_test' ] )
+                    if best_row is None or float( row[ 'best_test_loss' ] ) < float( best_row[ 'best_test_loss' ] ):
+                        best_row = dict( row )
+                else:
+                    row[ 'error' ] = result.get( 'error', 'Unknown error' )
+                    print( 'FAILED: ' + row[ 'error' ] )
+                    if 'traceback' in result:
+                        print( result[ 'traceback' ] )
 
-                if best_row is None or float( row[ 'best_test_loss' ] ) < float( best_row[ 'best_test_loss' ] ):
-                    best_row = dict( row )
-            except Exception as exc:
-                row[ 'status' ] = 'failed'
-                row[ 'error' ] = str( exc )
-                print( 'FAILED: ' + str(exc) )
-                print( traceback.format_exc() )
+                design_rows.append( row )
+        else:
+            max_workers = min( args.parallel_jobs, args.n_starts )
+            print( 'Launching ' + str(args.n_starts) + ' starts with ' + str(max_workers) +
+                   ' concurrent worker processes' )
 
-            replicate_rows.append( row )
+            spawn_ctx = mp.get_context( 'spawn' )
+            with concurrent.futures.ProcessPoolExecutor( max_workers=max_workers,
+                                                         mp_context=spawn_ctx ) as executor:
+                future_to_job = {}
+                for job in jobs:
+                    print( 'Queued run ' + str(job[ 'run' ]) + ' of ' + str(args.n_starts) + ' for ' + design_name )
+                    future = executor.submit( run_training_job, job )
+                    future_to_job[ future ] = job
+
+                for future in concurrent.futures.as_completed( future_to_job ):
+                    job = future_to_job[ future ]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = { 'status' : 'failed',
+                                   'error' : 'Worker process failed: ' + str( exc ) }
+
+                    row = { 'design_name' : design_name,
+                            'design_index' : design_ix,
+                            'run' : job[ 'run' ],
+                            'status' : result[ 'status' ],
+                            'error' : '',
+                            'best_test_loss' : '',
+                            'test_mae_ccs' : '',
+                            'test_rmse_ccs' : '',
+                            'n_test' : '',
+                            'checkpoint' : job[ 'checkpoint' ],
+                            'arch_json' : json.dumps( arch, sort_keys=True ), }
+
+                    if result[ 'status' ] == 'ok':
+                        metrics = result[ 'metrics' ]
+                        row[ 'best_test_loss' ] = format( float(metrics[ 'best_test_loss' ]), '.8f' )
+                        row[ 'test_mae_ccs' ] = format( float(metrics[ 'test_mae' ]), '.8f' )
+                        row[ 'test_rmse_ccs' ] = format( float(metrics[ 'test_rmse' ]), '.8f' )
+                        row[ 'n_test' ] = int( metrics[ 'n_test' ] )
+
+                        if best_row is None or float( row[ 'best_test_loss' ] ) < float( best_row[ 'best_test_loss' ] ):
+                            best_row = dict( row )
+
+                        print( 'Completed run ' + str(job[ 'run' ]) + ' / ' + str(args.n_starts) +
+                               ' for ' + design_name + ' (loss=' + row[ 'best_test_loss' ] + ')' )
+                    else:
+                        row[ 'error' ] = result.get( 'error', 'Unknown error' )
+                        print( 'FAILED run ' + str(job[ 'run' ]) + ' for ' + design_name + ': ' + row[ 'error' ] )
+                        if 'traceback' in result:
+                            print( result[ 'traceback' ] )
+
+                    design_rows.append( row )
+
+        design_rows = sorted( design_rows, key=lambda row: int( row[ 'run' ] ) )
+        replicate_rows.extend( design_rows )
 
         if best_row is None:
             winner_rows.append( { 'design_name' : design_name,
