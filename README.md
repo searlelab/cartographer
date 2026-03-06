@@ -1,6 +1,6 @@
 # Cartographer
 
-Spectral library predictor based on the Chronologer model ([github.com/searlelab/chronologer](https://github.com/searlelab/chronologer)).
+Peptide library predictor based on the Chronologer model ([github.com/searlelab/chronologer](https://github.com/searlelab/chronologer)).
 
 Cartographer predicts MS2 fragment ion intensities for peptides with post-translational modifications.
 It currently supports HCD fragmentation and predicts six ion channels (y+1, y+2, y+3, b+1, b+2, b+3).
@@ -16,8 +16,7 @@ It currently supports HCD fragmentation and predicts six ion channels (y+1, y+2,
 
 ## Training
 
-Cartographer trains on [Prospect-PTMs MS2](https://huggingface.co/datasets/searlelab/prospect-ptms-ms2) parquet shards.
-Download the dataset and point `--dataset_root` at the top-level directory containing the `data/` folder with `train-*.parquet` and `test-*.parquet` files.
+Cartographer trains on parquet shards. Download datasets and point `--dataset_root` at the top-level directory containing the `data/` folder with `train-*.parquet` and `test-*.parquet` files.
 
 ```
 python src/cartographer_trainer.py --dataset_root /path/to/prospect-ptms-ms2 \
@@ -67,10 +66,3 @@ Cartographer encodes peptide modifications as single-character tokens. The follo
 | TMT0 / TMT6plex | K, N-term | z/x, &/* |
 | Pyro-Glu | Q (N-term), E (N-term) | (, ) |
 
-## Library Generation
-
-A small test file (`fasta/Scer.fasta`) with 3 test proteins is included to test a working environment.
-
-```
-python src/Generate_Library.py fasta/Scer.fasta test.dlib
-```

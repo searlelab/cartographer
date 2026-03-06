@@ -32,7 +32,9 @@ def train_model( model,
                  file_name,
                  progress_tick_rows=0,
                  num_workers=0,
-                 epoch_callback=None, ):
+                 epoch_callback=None,
+                 patience=None,
+                 start_epoch=1, ):
 
     s_time = time.time()
 
@@ -53,8 +55,9 @@ def train_model( model,
     best_epoch = 0
     best_loss = 1e40
     tolerance = 1e-4
+    epochs_wo_improv = 0
 
-    for epoch in range( 1, num_epochs+1 ):
+    for epoch in range( start_epoch, num_epochs+1 ):
         print( 'Epoch ' + str(epoch) + ' of ' + str(num_epochs) )
         print( '-' * 50 )
 
@@ -145,6 +148,7 @@ def train_model( model,
                     torch.save( model.state_dict(), file_name )
                     epochs_wo_improv = 0
                 else:
+                    epochs_wo_improv += 1
                     print( 'Did not improve, best performance was epoch ' +
                            str(best_epoch) + ' (' + format(best_loss,'.4f') + ')' )
         if epoch_callback is not None:
@@ -152,6 +156,11 @@ def train_model( model,
 
         runtime = time.time() - s_time
         print( 'Runtime: ' + str(datetime.timedelta(seconds=runtime)).split('.')[0] + '\n' )
+
+        if patience is not None and epochs_wo_improv > patience:
+            print( 'Early stopping: no improvement for ' + str(epochs_wo_improv) +
+                   ' epochs (patience=' + str(patience) + ')' )
+            break
 
     return best_loss
 

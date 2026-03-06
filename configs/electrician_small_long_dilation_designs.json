@@ -1,0 +1,114 @@
+{
+  "designs": [
+    {
+      "name": "full_b3_e24_k5_d123",
+      "arch": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 2, 3],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e24_k5_d124",
+      "arch": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 2, 4],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e24_k5_d135",
+      "arch": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 3, 5],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e24_k5_d148",
+      "arch": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 4, 8],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e24_k5_d1816",
+      "arch": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 8, 16],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e32_k5_d123",
+      "arch": {
+        "embed_dim": 32,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 2, 3],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e32_k5_d124",
+      "arch": {
+        "embed_dim": 32,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 2, 4],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e32_k5_d135",
+      "arch": {
+        "embed_dim": 32,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 3, 5],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e32_k5_d148",
+      "arch": {
+        "embed_dim": 32,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 4, 8],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    },
+    {
+      "name": "full_b3_e32_k5_d1816",
+      "arch": {
+        "embed_dim": 32,
+        "n_blocks": 3,
+        "kernel": 5,
+        "dilation_schedule": [1, 8, 16],
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5
+      }
+    }
+  ]
+}

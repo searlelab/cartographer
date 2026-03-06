@@ -4,11 +4,11 @@ import numpy as np
 
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
-from cartographer_settings import training_parameters, progress_tick_rows, max_peptide_len
-from cartographer_model import initialize_cartographer_model
-from loss_functions import Spectrum_masked_negLogit
+from electrician_settings import training_parameters, progress_tick_rows, max_peptide_len
+from electrician_model import initialize_electrician_model
+from loss_functions import ChargeDistribution_CrossEntropy
 from training_loop import train_model, resolve_device
-from prospect_loader import ProspectMS2Dataset, discover_split_files
+from prospect_loader import ProspectChargeDataset, discover_split_files
 from tensorize import codedseq_to_array
 
 import torch
@@ -18,9 +18,6 @@ PRTC_PEPTIDES = [ 'SSAAPPPPPR', 'GISNEGQNASIK', 'HVLTSIGEK', 'DIPVPKPK',
                   'IGDYAGIK', 'TASEFDSAIAQDK', 'SAAGAFGPELSR', 'ELGQSGVDTYLQTK',
                   'GLILVGGYGTR', 'GILFVGSGVSGGEEGAR', 'SFANQPLEVVYSK',
                   'LTILEELR', 'NGFILDGFPR', 'ELASGLSFPVGFK', 'LSSEAPALFQFDLK', ]
-
-PRTC_NCE = 0.33   # NCE 33, normalized /100
-PRTC_CHARGE = 2    # +2H, one-hot index 1
 
 
 def build_prtc_inputs( device ):
@@ -34,23 +31,19 @@ def build_prtc_inputs( device ):
         seq_arrays.append( codedseq_to_array( coded, max_size=seq_size ) )
 
     seq_t = torch.from_numpy( np.array( seq_arrays, 'int64' ) ).to( device )
-    charge_t = torch.zeros( n, 6, device=device )
-    charge_t[ :, PRTC_CHARGE - 1 ] = 1.0
-    nce_t = torch.full( (n, 1), PRTC_NCE, device=device )
-
-    return seq_t, charge_t, nce_t
+    return seq_t
 
 
 def make_prtc_callback( prtc_file, device ):
-    """Return a callback that writes PRTC predictions to TSV after each epoch."""
+    """Return a callback that writes PRTC charge predictions to TSV after each epoch."""
     device = resolve_device( device )
-    seq_t, charge_t, nce_t = build_prtc_inputs( device )
+    seq_t = build_prtc_inputs( device )
 
     def callback( model, epoch ):
         model.to( device )
         model.eval()
         with torch.no_grad():
-            pred = model( seq_t, charge_t, nce_t )
+            pred = model( seq_t )
         pred_np = pred.cpu().numpy()
 
         with open( prtc_file, 'a' ) as f:
@@ -64,19 +57,19 @@ def make_prtc_callback( prtc_file, device ):
 def parse_args(args):
     src_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = datetime.now().strftime( '%Y%m%d%H%M%S' )
-    default_out_filename = 'Cartographer_'+timestamp+'.pt'
+    default_out_filename = 'Electrician_'+timestamp+'.pt'
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_root',
                         type=str,
                         required=True,
-                        help='Path to prospect-ptms-ms2 dataset directory')
+                        help='Path to prospect-ptms-charge dataset directory')
     parser.add_argument('--output_file',
                         type=str,
                         help='Model filename',
                         default=default_out_filename)
     parser.add_argument('--output_dir',
                         type=str,
-                        help='Directory to save model (default is Cartographer/models)',
+                        help='Directory to save model (default is Electrician/models)',
                         default=os.path.join(src_dir,'..','models'))
     parser.add_argument('--device',
                         type=str,
@@ -88,7 +81,11 @@ def parse_args(args):
                         default=0)
     parser.add_argument('--prtc_report',
                         type=str,
-                        help='TSV file to log PRTC peptide predictions each epoch',
+                        help='TSV file to log PRTC peptide charge predictions each epoch',
+                        default=None)
+    parser.add_argument('--patience',
+                        type=int,
+                        help='Early stopping: exit if no improvement for this many epochs',
                         default=None)
     parser.add_argument('--model_file',
                         type=str,
@@ -105,9 +102,10 @@ def parse_args(args):
     return parser.parse_args(args)
 
 
-def train_cartographer( dataset_root, output_file_name, device='auto', num_workers=0,
-                        prtc_report=None, model_file=None, start_epoch=1, n_epochs=None, ):
-    print( 'Cartographer training initiated' )
+def train_electrician( dataset_root, output_file_name, device='auto', num_workers=0,
+                       prtc_report=None, patience=None, model_file=None, start_epoch=1, n_epochs=None,
+                       arch_overrides=None, ):
+    print( 'Electrician training initiated' )
 
     # Discover pre-split parquet shards
     train_files = discover_split_files( dataset_root, 'train' )
@@ -117,13 +115,14 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
     assert len(train_files) > 0, 'No train parquet files found in ' + dataset_root
     assert len(test_files) > 0, 'No test parquet files found in ' + dataset_root
 
-    datasets = { 'train' : ProspectMS2Dataset( train_files, shuffle_files=True ),
-                 'test'  : ProspectMS2Dataset( test_files,  shuffle_files=False ), }
+    datasets = { 'train' : ProspectChargeDataset( train_files, shuffle_files=True ),
+                 'test'  : ProspectChargeDataset( test_files,  shuffle_files=False ), }
     print( 'Datasets created' )
 
-    model = initialize_cartographer_model( frag_type='beam', model_file=model_file )
+    model = initialize_electrician_model( model_file=model_file,
+                                          arch_overrides=arch_overrides )
 
-    loss_fx = Spectrum_masked_negLogit( )
+    loss_fx = ChargeDistribution_CrossEntropy( )
 
     parameters = list(model.parameters())
     optimizer = training_parameters[ 'optimizer' ]( parameters,
@@ -138,13 +137,13 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
     if prtc_report is not None:
         # Truncate file and write header
         with open( prtc_report, 'w' ) as f:
-            f.write( 'epoch\tpeptide\t' + '\t'.join( 'i' + str(i) for i in range(174) ) + '\n' )
+            f.write( 'epoch\tpeptide\tz1\tz2\tz3\tz4\tz5\tz6\n' )
         epoch_callback = make_prtc_callback( prtc_report, device )
         print( 'PRTC report: ' + prtc_report )
 
     num_epochs = n_epochs if n_epochs is not None else training_parameters[ 'n_epochs' ]
 
-    print( 'Ready to begin Cartographer training' )
+    print( 'Ready to begin Electrician training' )
     final_loss = train_model( model,
                               datasets,
                               training_parameters[ 'initial_batch_size' ],
@@ -159,6 +158,7 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
                               progress_tick_rows=progress_tick_rows,
                               num_workers=num_workers,
                               epoch_callback=epoch_callback,
+                              patience=patience,
                               start_epoch=start_epoch, )
     return final_loss
 
@@ -175,9 +175,10 @@ def main():
                    'Use a different output filename to avoid overwriting the source model.' )
             sys.exit(1)
 
-    train_cartographer( args.dataset_root, model_out_file,
+    train_electrician( args.dataset_root, model_out_file,
                         device=args.device, num_workers=args.num_workers,
                         prtc_report=args.prtc_report,
+                        patience=args.patience,
                         model_file=args.model_file,
                         start_epoch=args.start_epoch,
                         n_epochs=args.n_epochs, )

@@ -45,6 +45,22 @@ class RT_masked_negLogL( nn.Module ):
         return mean_neg_logL
     
     
+class ChargeDistribution_CrossEntropy( nn.Module ):
+    def __init__( self, fdr=train_fdr, ):
+        super().__init__()
+        self.fdr = fdr
+
+    def forward( self, pred, true, weights, eps=epsilon, ):
+        log_pred = torch.log( pred.clamp( eps, ) )
+        ce_per_sample = -torch.sum( true * log_pred, dim=1 )
+
+        outlier_mask = generate_outlier_mask( ce_per_sample, 'gumbel', self.fdr, )
+        mean_ce = ( torch.sum( ce_per_sample * outlier_mask ) + eps ) /\
+                  ( torch.sum( outlier_mask ) + eps )
+
+        return mean_ce
+
+
 class Spectrum_masked_negLogit( nn.Module ):
     def __init__( self, fdr=train_fdr, ):
         super().__init__()
