@@ -50,19 +50,32 @@ This produces two files alongside the model:
 
 ## Supported Modifications
 
-Cartographer encodes peptide modifications as single-character tokens. The following modifications are supported:
+Coverage below is based on UNIMOD token mappings in `src/tensorize.py` (Chronologer/Cartographer/Electrician) and `src/sculptor_tensorize.py` (Sculptor). Rows are sorted by overall coverage, then by covered tool set, then alphabetically by modification.
 
-| Modification | Residues | Token |
-| --- | --- | --- |
-| Carbamidomethyl | C | c |
-| Oxidation | M, W | m, w |
-| Phospho | S, T, Y | s, t, y |
-| Acetyl | K, N-term | a, ^ |
-| Methyl | K, R | n/o/p, q/r |
-| Succinyl | K | b |
-| GlyGly (Ub) | K | u |
-| Deamidation | N, Q, R | f, g, k |
-| HexNAc | N, S, T | h, i, j |
-| TMT0 / TMT6plex | K, N-term | z/x, &/* |
-| Pyro-Glu | Q (N-term), E (N-term) | (, ) |
-
+| Modification | Sites | UNIMOD | Chronologer | Cartographer | Electrician | Sculptor | Overall Coverage | Covered By |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Acetyl | K, N-term | 1 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Carbamidomethyl | C | 4 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Deamidation | N, Q, R | 7 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Dimethyl | K, R | 36 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| GlyGly (Ub) | K | 121 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| HexNAc | N, S, T | 43 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Methyl | K, R | 34 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Oxidation | M, W | 35 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Phospho | S, T, Y | 21 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Succinyl | K | 64 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Trimethyl | K | 37 | Yes | Yes | Yes | Yes | 4/4 | Chronologer, Cartographer, Electrician, Sculptor |
+| Pyro-Glu | Q (N-term), E (N-term) | 28, 27 | Yes | Yes | Yes | No | 3/4 | Chronologer, Cartographer, Electrician |
+| TMT0 | K, N-term | 739 | Yes | Yes | Yes | No | 3/4 | Chronologer, Cartographer, Electrician |
+| TMT6plex | K, N-term | 737 | Yes | Yes | Yes | No | 3/4 | Chronologer, Cartographer, Electrician |
+| Biotin | K | 3 | No | No | No | Yes | 1/4 | Sculptor |
+| Butyryl | K | 1289 | No | No | No | Yes | 1/4 | Sculptor |
+| Crotonyl | K | 1363 | No | No | No | Yes | 1/4 | Sculptor |
+| Cysteinyl | C | 312 | No | No | No | Yes | 1/4 | Sculptor |
+| Formyl | K | 122 | No | No | No | Yes | 1/4 | Sculptor |
+| Glutarylation | K | 1848 | No | No | No | Yes | 1/4 | Sculptor |
+| Glycosyl hydroxyproline | P | 408 | No | No | No | Yes | 1/4 | Sculptor |
+| Hydroxyisobutyryl | K | 1849 | No | No | No | Yes | 1/4 | Sculptor |
+| Malonyl | K | 747 | No | No | No | Yes | 1/4 | Sculptor |
+| Nitro | Y | 354 | No | No | No | Yes | 1/4 | Sculptor |
+| Propionyl | K, N-term | 58 | No | No | No | Yes | 1/4 | Sculptor |
