@@ -25,25 +25,83 @@ def parse_slice_splits( raw_value ):
     return result
 
 
+def _looks_like_windows_abs_path( path ):
+    raw = str( path )
+    return len( raw ) >= 3 and raw[1] == ':' and raw[2] in [ '\\', '/' ]
+
+
+def _candidate_csv_paths( dataset_root, metadata_input_csv ):
+    parent_dir = os.path.dirname( os.path.abspath( dataset_root ) )
+    default_name = 'union_ccs.csv'
+
+    candidates = []
+    if metadata_input_csv is not None and str( metadata_input_csv ).strip() != '':
+        raw = str( metadata_input_csv ).strip()
+        candidates.append( raw )
+        if not os.path.isabs( raw ) and not _looks_like_windows_abs_path( raw ):
+            candidates.append( os.path.join( dataset_root, raw ) )
+
+        # Handle metadata generated on another OS path style.
+        base = raw.replace( '\\', '/' ).split( '/' )[-1]
+        if base != '':
+            candidates.append( os.path.join( dataset_root, base ) )
+            candidates.append( os.path.join( parent_dir, base ) )
+
+    candidates.append( os.path.join( dataset_root, default_name ) )
+    candidates.append( os.path.join( parent_dir, default_name ) )
+
+    deduped = []
+    seen = set()
+    for path in candidates:
+        norm = os.path.abspath( path ) if not os.path.isabs( path ) else os.path.normpath( path )
+        if norm in seen:
+            continue
+        seen.add( norm )
+        deduped.append( path )
+    return deduped
+
+
 def resolve_slice_input_csv( dataset_root, explicit_csv=None ):
+    dataset_root = os.path.abspath( dataset_root )
+    resolution_notes = []
+
     if explicit_csv is not None:
         if not os.path.isfile( explicit_csv ):
             raise FileNotFoundError( 'slice input CSV not found: ' + explicit_csv )
-        return os.path.abspath( explicit_csv )
+        return os.path.abspath( explicit_csv ), resolution_notes
 
     metadata_path = os.path.join( dataset_root, metadata_filename )
-    if not os.path.isfile( metadata_path ):
-        raise FileNotFoundError( 'Could not find metadata JSON: ' + metadata_path )
+    metadata_input_csv = None
+    if os.path.isfile( metadata_path ):
+        with open( metadata_path, 'r' ) as f:
+            metadata = json.load( f )
+        metadata_input_csv = metadata.get( 'input_csv', None )
+        if metadata_input_csv is not None and str( metadata_input_csv ).strip() != '':
+            resolution_notes.append( 'metadata_input_csv=' + str( metadata_input_csv ) )
+        else:
+            resolution_notes.append( 'metadata_input_csv missing in metadata file' )
+    else:
+        resolution_notes.append( 'metadata file not found: ' + metadata_path )
 
-    with open( metadata_path, 'r' ) as f:
-        metadata = json.load( f )
+    candidates = _candidate_csv_paths( dataset_root, metadata_input_csv )
+    for candidate in candidates:
+        if os.path.isfile( candidate ):
+            resolved = os.path.abspath( candidate )
+            if metadata_input_csv is not None and str( metadata_input_csv ).strip() != '':
+                metadata_abs = os.path.abspath( str( metadata_input_csv ) )
+                if metadata_abs != resolved:
+                    resolution_notes.append( 'using fallback input_csv=' + resolved )
+            return resolved, resolution_notes
 
-    input_csv = metadata.get( 'input_csv', None )
-    if input_csv is None or str(input_csv).strip() == '':
-        raise ValueError( 'Metadata missing input_csv field: ' + metadata_path )
-    if not os.path.isfile( input_csv ):
-        raise FileNotFoundError( 'Metadata input_csv does not exist on this machine: ' + str(input_csv) )
-    return os.path.abspath( input_csv )
+    searched = []
+    for candidate in candidates:
+        if os.path.isabs( candidate ) or _looks_like_windows_abs_path( candidate ):
+            searched.append( os.path.normpath( candidate ) )
+        else:
+            searched.append( os.path.abspath( candidate ) )
+    raise FileNotFoundError( 'Could not resolve slice diagnostics input CSV. '
+                             'Pass --slice_input_csv with a local union_ccs.csv path. '
+                             'Searched: ' + '; '.join( searched ) )
 
 
 def run_slice_diagnostics( python_executable,
@@ -55,11 +113,6 @@ def run_slice_diagnostics( python_executable,
                            slice_splits='train,test',
                            slice_max_rows=None, ):
     splits = parse_slice_splits( slice_splits )
-    input_csv = resolve_slice_input_csv( dataset_root, explicit_csv=slice_input_csv )
-
-    diagnostics_script = os.path.join( src_dir, 'sculptor_slice_diagnostics.py' )
-    if not os.path.isfile( diagnostics_script ):
-        raise FileNotFoundError( 'Diagnostics script not found: ' + diagnostics_script )
 
     log_path = os.path.join( output_dir, 'slice_diagnostics.log' )
     markdown_paths = []
@@ -68,7 +121,6 @@ def run_slice_diagnostics( python_executable,
         log.write( 'Sculptor slice diagnostics log\n' )
         log.write( 'generated_at_utc=' + datetime.now( timezone.utc ).strftime( '%Y-%m-%dT%H:%M:%SZ' ) + '\n' )
         log.write( 'dataset_root=' + os.path.abspath( dataset_root ) + '\n' )
-        log.write( 'input_csv=' + input_csv + '\n' )
         log.write( 'splits=' + ','.join( splits ) + '\n' )
         if slice_max_rows is not None:
             log.write( 'slice_max_rows=' + str(slice_max_rows) + '\n' )
@@ -76,6 +128,25 @@ def run_slice_diagnostics( python_executable,
             log.write( 'final_model_path=' + os.path.abspath( path ) + '\n' )
         log.write( '\n' )
 
+        try:
+            input_csv, resolution_notes = resolve_slice_input_csv( dataset_root, explicit_csv=slice_input_csv )
+        except Exception as exc:
+            log.write( 'status=SKIPPED\n' )
+            log.write( 'reason=Failed to resolve input CSV: ' + str( exc ) + '\n' )
+            return log_path, markdown_paths
+
+        log.write( 'input_csv=' + input_csv + '\n' )
+        for note in resolution_notes:
+            log.write( 'resolution_note=' + note + '\n' )
+        log.write( '\n' )
+
+        diagnostics_script = os.path.join( src_dir, 'sculptor_slice_diagnostics.py' )
+        if not os.path.isfile( diagnostics_script ):
+            log.write( 'status=SKIPPED\n' )
+            log.write( 'reason=Diagnostics script not found: ' + diagnostics_script + '\n' )
+            return log_path, markdown_paths
+
+        failed_splits = []
         for split in splits:
             output_md = os.path.join( output_dir, 'slice_diagnostics_' + split + '.md' )
             cmd = [ python_executable,
@@ -104,9 +175,15 @@ def run_slice_diagnostics( python_executable,
             log.write( '\n' )
 
             if result.returncode != 0:
-                raise RuntimeError( 'Slice diagnostics failed for split=' + split +
-                                    '. See log: ' + log_path )
+                failed_splits.append( split )
+                continue
 
             markdown_paths.append( output_md )
+
+        if len( failed_splits ) > 0:
+            log.write( 'status=PARTIAL_FAILURE\n' )
+            log.write( 'failed_splits=' + ','.join( failed_splits ) + '\n' )
+        else:
+            log.write( 'status=OK\n' )
 
     return log_path, markdown_paths

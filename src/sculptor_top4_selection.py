@@ -139,8 +139,11 @@ def main():
                                                       slice_splits=args.slice_splits,
                                                       slice_max_rows=args.slice_max_rows, )
     print( 'Slice diagnostics log: ' + log_path )
-    for path in markdown_paths:
-        print( 'Slice diagnostics markdown: ' + path )
+    if len( markdown_paths ) == 0:
+        print( 'Slice diagnostics did not produce markdown output. See log for details.' )
+    else:
+        for path in markdown_paths:
+            print( 'Slice diagnostics markdown: ' + path )
 
 
 if __name__ == '__main__':
