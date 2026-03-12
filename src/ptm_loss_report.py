@@ -27,9 +27,7 @@ from sculptor_settings import max_peptide_len as sculptor_max_len
 from sculptor_settings import metadata_filename as sculptor_metadata_filename
 from tensorize import codedseq_to_array as codedseq_to_array_common
 from tensorize import modseq_to_codedseq, unimod_to_codedseq as unimod_to_codedseq_common
-from sculptor_tensorize import codedseq_to_array as codedseq_to_array_sculptor
-from sculptor_tensorize import return_charge_onehot
-from sculptor_tensorize import unimod_to_codedseq as unimod_to_codedseq_sculptor
+from sculptor_tensorize import residues as sculptor_default_residues
 
 
 UNIMOD_PATTERN = re.compile( r'UNIMOD:\d+' )
@@ -67,6 +65,13 @@ MOD_ROWS = [
 ]
 
 MODEL_ORDER = [ 'Chronologer', 'Cartographer', 'Electrician', 'Sculptor' ]
+
+
+LEGACY_SCULPTOR_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/IM2Deep_CCS'
+LEGACY_SCULPTOR_INPUT_CSV = '/Users/searle.brian/Documents/testing/trainingdata/union_ccs.csv'
+LEGACY_ELECTRICIAN_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/prospect-ptms-charge'
+LEGACY_CARTOGRAPHER_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/prospect-ptms-ms2'
+LEGACY_CHRONOLOGER_DB = '/Users/searle.brian/Documents/projects/chronologer/data/Chronologer_DB_220308.txt'
 
 
 UNIMOD_TO_MOD = {
@@ -152,26 +157,31 @@ def parse_args( args ):
                          type=str,
                          default='models/Chronologer_20220317200246.pt',
                          help='Chronologer checkpoint path' )
+    parser.add_argument( '--hf_data_root',
+                         type=str,
+                         default=None,
+                         help=( 'Optional common data root containing IM2Deep_CCS, prospect-ptms-charge, '
+                                'and prospect-ptms-ms2 subfolders' ) )
     parser.add_argument( '--sculptor_dataset_root',
                          type=str,
-                         default='/Users/searle.brian/Documents/huggingface/data/IM2Deep_CCS',
-                         help='Sculptor dataset root (metadata lookup)' )
+                         default=None,
+                         help='Sculptor dataset root (metadata lookup). Env: SCULPTOR_DATASET_ROOT' )
     parser.add_argument( '--sculptor_input_csv',
                          type=str,
-                         default='/Users/searle.brian/Documents/testing/trainingdata/union_ccs.csv',
-                         help='Sculptor source CSV used for split and PTM parsing' )
+                         default=None,
+                         help='Optional Sculptor source CSV (legacy/debug only). Env: SCULPTOR_INPUT_CSV' )
     parser.add_argument( '--electrician_dataset_root',
                          type=str,
-                         default='/Users/searle.brian/Documents/huggingface/data/prospect-ptms-charge',
-                         help='Electrician parquet dataset root' )
+                         default=None,
+                         help='Electrician parquet dataset root. Env: ELECTRICIAN_DATASET_ROOT' )
     parser.add_argument( '--cartographer_dataset_root',
                          type=str,
-                         default='/Users/searle.brian/Documents/huggingface/data/prospect-ptms-ms2',
-                         help='Cartographer parquet dataset root' )
+                         default=None,
+                         help='Cartographer parquet dataset root. Env: CARTOGRAPHER_DATASET_ROOT' )
     parser.add_argument( '--chronologer_db',
                          type=str,
-                         default='/Users/searle.brian/Documents/projects/chronologer/data/Chronologer_DB_220308.txt',
-                         help='Chronologer training database (TSV)' )
+                         default=None,
+                         help='Chronologer training database TSV. Env: CHRONOLOGER_DB' )
     parser.add_argument( '--device',
                          type=str,
                          default='auto',
@@ -233,11 +243,71 @@ def resolve_device( raw, strict_device=False ):
     return device
 
 
-def choose_split_ccs( modified_sequence, test_fraction=0.2 ):
-    digest = hashlib.md5( modified_sequence.encode( 'utf-8' ) ).hexdigest()
-    bucket = int( digest, 16 ) % 10000000
-    threshold = int( test_fraction * 10000000 )
-    return 'test' if bucket < threshold else 'train'
+def _first_present( values ):
+    for value in values:
+        if value is None:
+            continue
+        text = str( value ).strip()
+        if text != '':
+            return text
+    return None
+
+
+def _resolve_path_setting( explicit_value, env_name=None, derived_value=None, legacy_value=None, required_label='path' ):
+    candidate = _first_present( [
+        explicit_value,
+        os.environ.get( env_name, None ) if env_name is not None else None,
+        derived_value,
+    ] )
+    if candidate is not None:
+        return candidate
+    if legacy_value is not None and os.path.exists( legacy_value ):
+        return legacy_value
+    env_hint = '' if env_name is None else ( ' or set env ' + env_name )
+    raise ValueError( 'Missing ' + required_label + '. Set CLI flag' + env_hint + '.' )
+
+
+def resolve_input_paths( args ):
+    hf_root = _first_present( [ args.hf_data_root ] )
+    sculptor_from_hf = None if hf_root is None else os.path.join( hf_root, 'IM2Deep_CCS' )
+    electrician_from_hf = None if hf_root is None else os.path.join( hf_root, 'prospect-ptms-charge' )
+    cartographer_from_hf = None if hf_root is None else os.path.join( hf_root, 'prospect-ptms-ms2' )
+
+    args.sculptor_dataset_root = _resolve_path_setting(
+        explicit_value=args.sculptor_dataset_root,
+        env_name='SCULPTOR_DATASET_ROOT',
+        derived_value=sculptor_from_hf,
+        legacy_value=LEGACY_SCULPTOR_DATASET_ROOT,
+        required_label='Sculptor dataset root (--sculptor_dataset_root)',
+    )
+    args.sculptor_input_csv = _first_present( [
+        args.sculptor_input_csv,
+        os.environ.get( 'SCULPTOR_INPUT_CSV', None ),
+        LEGACY_SCULPTOR_INPUT_CSV if os.path.exists( LEGACY_SCULPTOR_INPUT_CSV ) else None,
+    ] )
+    args.electrician_dataset_root = _resolve_path_setting(
+        explicit_value=args.electrician_dataset_root,
+        env_name='ELECTRICIAN_DATASET_ROOT',
+        derived_value=electrician_from_hf,
+        legacy_value=LEGACY_ELECTRICIAN_DATASET_ROOT,
+        required_label='Electrician dataset root (--electrician_dataset_root)',
+    )
+    args.cartographer_dataset_root = _resolve_path_setting(
+        explicit_value=args.cartographer_dataset_root,
+        env_name='CARTOGRAPHER_DATASET_ROOT',
+        derived_value=cartographer_from_hf,
+        legacy_value=LEGACY_CARTOGRAPHER_DATASET_ROOT,
+        required_label='Cartographer dataset root (--cartographer_dataset_root)',
+    )
+    args.chronologer_db = _resolve_path_setting(
+        explicit_value=args.chronologer_db,
+        env_name='CHRONOLOGER_DB',
+        derived_value=None,
+        legacy_value=LEGACY_CHRONOLOGER_DB,
+        required_label='Chronologer DB (--chronologer_db)',
+    )
+
+    return args
 
 
 def safe_abs_path( path ):
@@ -261,6 +331,56 @@ def to_mod_occurrences_unimod( modified_sequence ):
     for tag in tags:
         if tag in UNIMOD_TO_MOD:
             out.append( UNIMOD_TO_MOD[ tag ] )
+    return out
+
+
+def build_sculptor_token_to_mod( metadata ):
+    tokenizer = metadata.get( 'tokenizer', {} ) if isinstance( metadata, dict ) else {}
+    token_to_mod = {}
+
+    residue_entries = tokenizer.get( 'residue_unimod_map', [] )
+    for entry in residue_entries:
+        if not isinstance( entry, dict ):
+            continue
+        token = str( entry.get( 'token', '' ) )
+        unimod = str( entry.get( 'unimod', '' ) )
+        if token == '':
+            continue
+        mod_name = UNIMOD_TO_MOD.get( unimod, None )
+        if mod_name is not None:
+            token_to_mod[ token ] = mod_name
+
+    nterm_entries = tokenizer.get( 'nterm_unimod_map', {} )
+    if isinstance( nterm_entries, dict ):
+        for unimod, token in nterm_entries.items():
+            token_text = str( token )
+            mod_name = UNIMOD_TO_MOD.get( str(unimod), None )
+            if token_text != '' and mod_name is not None:
+                token_to_mod[ token_text ] = mod_name
+
+    residues = tokenizer.get( 'residues', None )
+    if not isinstance( residues, list ) or len( residues ) == 0:
+        residues = list( sculptor_default_residues )
+
+    return token_to_mod, residues
+
+
+def to_mod_occurrences_sculptor_tokens( seq_tokens, token_to_mod, residues ):
+    out = []
+    max_token = len( residues )
+    for raw_value in seq_tokens:
+        try:
+            token_index = int( raw_value )
+        except Exception:
+            continue
+        if token_index == 0:
+            break
+        if token_index < 1 or token_index > max_token:
+            continue
+        token_char = residues[ token_index - 1 ]
+        mod_name = token_to_mod.get( token_char, None )
+        if mod_name is not None:
+            out.append( mod_name )
     return out
 
 
@@ -387,6 +507,7 @@ def evaluate_sculptor( args, device ):
     ccs_std = float( metadata.get( 'train_ccs_std', 1.0 ) )
     if ccs_std <= 0.0:
         ccs_std = 1.0
+    token_to_mod, residues = build_sculptor_token_to_mod( metadata )
 
     model = initialize_sculptor_model( model_file=args.sculptor_model, map_location='cpu' )
     model = model.to( device )
@@ -395,10 +516,14 @@ def evaluate_sculptor( args, device ):
     train_counts = Counter()
     eval_stats = MSEStats()
     by_mod_stats = defaultdict( MSEStats )
-    skipped_bad_numeric = 0
-    skipped_tokenization = 0
+    skipped_invalid_rows = 0
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
+
+    train_files = discover_split_files( args.sculptor_dataset_root, 'train' )
+    test_files = discover_split_files( args.sculptor_dataset_root, 'test' )
+    if len( train_files ) == 0 or len( test_files ) == 0:
+        raise RuntimeError( 'Missing Sculptor train/test parquet files under ' + args.sculptor_dataset_root )
 
     seq_batch = []
     charge_batch = []
@@ -428,68 +553,64 @@ def evaluate_sculptor( args, device ):
             rmse_text = 'n/a' if current_rmse is None else format( current_rmse, '.6f' )
             log( '[Sculptor] evaluated=' + str( processed_eval ) +
                  ' rmse=' + rmse_text +
-                 ' skipped_bad_numeric=' + str( skipped_bad_numeric ) +
-                 ' skipped_tokenization=' + str( skipped_tokenization ) )
+                 ' skipped_invalid_rows=' + str( skipped_invalid_rows ) )
             next_log += max( int( args.log_every ), 1 )
         seq_batch.clear()
         charge_batch.clear()
         true_ccs_batch.clear()
         mods_batch.clear()
 
-    with open( args.sculptor_input_csv, 'r', newline='' ) as handle:
-        reader = csv.DictReader( handle )
-        required = set( [ 'modified_sequence', 'charge', 'ccs' ] )
-        if not required.issubset( set( reader.fieldnames or [] ) ):
-            raise ValueError( 'Sculptor CSV missing required columns: ' + str( sorted( required ) ) )
-
-        for row in reader:
-            modified_sequence = str( row[ 'modified_sequence' ] ).strip()
-            split = choose_split_ccs( modified_sequence, test_fraction=0.2 )
-
-            mod_occ = to_mod_occurrences_unimod( modified_sequence )
-            if split == 'train':
+    for i, path in enumerate( train_files ):
+        log( '[Sculptor] counting train PTMs file ' + str(i + 1) + '/' + str( len(train_files) ) +
+             ': ' + os.path.basename( path ) )
+        pf = pq.ParquetFile( path )
+        for rg_idx in range( pf.metadata.num_row_groups ):
+            table = pf.read_row_group( rg_idx, columns=[ 'seq_tokens' ] )
+            seq_rows = table.column( 'seq_tokens' ).to_pylist()
+            for seq_tokens in seq_rows:
+                mod_occ = to_mod_occurrences_sculptor_tokens( seq_tokens, token_to_mod, residues )
                 update_occurrence_counter( mod_occ, train_counts )
 
-            try:
-                charge = int( row[ 'charge' ] )
-                ccs = float( row[ 'ccs' ] )
-            except Exception:
-                skipped_bad_numeric += 1
-                continue
+    for i, path in enumerate( test_files ):
+        log( '[Sculptor] evaluating test file ' + str(i + 1) + '/' + str( len(test_files) ) +
+             ': ' + os.path.basename( path ) )
+        pf = pq.ParquetFile( path )
+        for rg_idx in range( pf.metadata.num_row_groups ):
+            table = pf.read_row_group( rg_idx, columns=[ 'seq_tokens', 'charge_onehot', 'ccs' ] )
+            seq_rows = table.column( 'seq_tokens' ).to_pylist()
+            charge_rows = table.column( 'charge_onehot' ).to_pylist()
+            ccs_rows = table.column( 'ccs' ).to_pylist()
+            for row_idx in range( len( seq_rows ) ):
+                seq_tokens = seq_rows[ row_idx ]
+                charge_onehot = charge_rows[ row_idx ]
+                ccs = ccs_rows[ row_idx ]
 
-            coded = unimod_to_codedseq_sculptor( modified_sequence, max_len=sculptor_max_len, skip_counts=None )
-            if coded is None:
-                skipped_tokenization += 1
-                continue
+                if seq_tokens is None or charge_onehot is None or ccs is None:
+                    skipped_invalid_rows += 1
+                    continue
 
-            if split != 'test':
-                continue
+                mod_occ = to_mod_occurrences_sculptor_tokens( seq_tokens, token_to_mod, residues )
 
-            seq_tokens = codedseq_to_array_sculptor( coded, max_size=sculptor_max_len + 2 )
-            charge_onehot = return_charge_onehot( charge )
+                seq_batch.append( np.asarray( seq_tokens, dtype='int64' ) )
+                charge_batch.append( np.asarray( charge_onehot, dtype='float32' ) )
+                true_ccs_batch.append( float( ccs ) )
+                mods_batch.append( mod_occ )
 
-            seq_batch.append( seq_tokens )
-            charge_batch.append( charge_onehot )
-            true_ccs_batch.append( ccs )
-            mods_batch.append( mod_occ )
-
-            if len( seq_batch ) >= args.batch_size:
-                flush()
+                if len( seq_batch ) >= args.batch_size:
+                    flush()
 
     flush()
 
     elapsed = time.time() - start_time
     log( '[Sculptor] complete in ' + format( elapsed, '.1f' ) + 's; evaluated=' + str( processed_eval ) +
-         ' skipped_bad_numeric=' + str( skipped_bad_numeric ) +
-         ' skipped_tokenization=' + str( skipped_tokenization ) )
+         ' skipped_invalid_rows=' + str( skipped_invalid_rows ) )
 
     return { 'model_name' : 'Sculptor',
              'average_rmse' : eval_stats.rmse(),
              'train_counts' : dict( train_counts ),
              'ptm_rmse' : { k : v.rmse() for k, v in by_mod_stats.items() if v.count > 0 },
              'n_eval_samples' : int( eval_stats.count ),
-             'skipped_bad_numeric' : int( skipped_bad_numeric ),
-             'skipped_tokenization' : int( skipped_tokenization ),
+             'skipped_invalid_rows' : int( skipped_invalid_rows ),
              'eval_metric' : 'RMSE(CCS)' }
 
 
@@ -896,6 +1017,7 @@ def write_text(output_path, text):
 def main():
     total_start_time = time.time()
     args = parse_args( os.sys.argv[1:] )
+    args = resolve_input_paths( args )
     cuda_available = torch.cuda.is_available()
     mps_available = hasattr( torch.backends, 'mps' ) and torch.backends.mps.is_available()
     mps_built = hasattr( torch.backends, 'mps' ) and torch.backends.mps.is_built()
@@ -904,14 +1026,18 @@ def main():
          ', mps_built=' + str(mps_built) )
     device = resolve_device( args.device, strict_device=args.strict_device )
     log( 'Using device: ' + device + ' (requested=' + str(args.device) + ')' )
+    log( 'Input paths:' )
+    log( '  sculptor_dataset_root=' + args.sculptor_dataset_root )
+    log( '  sculptor_input_csv=' + args.sculptor_input_csv )
+    log( '  electrician_dataset_root=' + args.electrician_dataset_root )
+    log( '  cartographer_dataset_root=' + args.cartographer_dataset_root )
+    log( '  chronologer_db=' + args.chronologer_db )
 
     required_files = [ args.sculptor_model, args.electrician_model, args.cartographer_model, args.chronologer_model ]
     for path in required_files:
         if not os.path.isfile( path ):
             raise FileNotFoundError( 'Model file not found: ' + path )
 
-    if not os.path.isfile( args.sculptor_input_csv ):
-        raise FileNotFoundError( 'Sculptor input CSV not found: ' + args.sculptor_input_csv )
     if not os.path.isfile( args.chronologer_db ):
         raise FileNotFoundError( 'Chronologer DB not found: ' + args.chronologer_db )
 
@@ -941,5 +1067,4 @@ def main():
 
 
 if __name__ == '__main__':
-    import hashlib  # local import to avoid accidental global side effects
     main()
