@@ -68,7 +68,6 @@ MODEL_ORDER = [ 'Chronologer', 'Cartographer', 'Electrician', 'Sculptor' ]
 
 
 LEGACY_SCULPTOR_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/IM2Deep_CCS'
-LEGACY_SCULPTOR_INPUT_CSV = '/Users/searle.brian/Documents/testing/trainingdata/union_ccs.csv'
 LEGACY_ELECTRICIAN_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/prospect-ptms-charge'
 LEGACY_CARTOGRAPHER_DATASET_ROOT = '/Users/searle.brian/Documents/huggingface/data/prospect-ptms-ms2'
 LEGACY_CHRONOLOGER_DB = '/Users/searle.brian/Documents/projects/chronologer/data/Chronologer_DB_220308.txt'
@@ -166,10 +165,6 @@ def parse_args( args ):
                          type=str,
                          default=None,
                          help='Sculptor dataset root (metadata lookup). Env: SCULPTOR_DATASET_ROOT' )
-    parser.add_argument( '--sculptor_input_csv',
-                         type=str,
-                         default=None,
-                         help='Optional Sculptor source CSV (legacy/debug only). Env: SCULPTOR_INPUT_CSV' )
     parser.add_argument( '--electrician_dataset_root',
                          type=str,
                          default=None,
@@ -280,11 +275,6 @@ def resolve_input_paths( args ):
         legacy_value=LEGACY_SCULPTOR_DATASET_ROOT,
         required_label='Sculptor dataset root (--sculptor_dataset_root)',
     )
-    args.sculptor_input_csv = _first_present( [
-        args.sculptor_input_csv,
-        os.environ.get( 'SCULPTOR_INPUT_CSV', None ),
-        LEGACY_SCULPTOR_INPUT_CSV if os.path.exists( LEGACY_SCULPTOR_INPUT_CSV ) else None,
-    ] )
     args.electrician_dataset_root = _resolve_path_setting(
         explicit_value=args.electrician_dataset_root,
         env_name='ELECTRICIAN_DATASET_ROOT',
@@ -312,6 +302,12 @@ def resolve_input_paths( args ):
 
 def safe_abs_path( path ):
     return os.path.abspath( path )
+
+
+def safe_text( value ):
+    if value is None:
+        return '(none)'
+    return str( value )
 
 
 def to_mod_occurrences_unimod( modified_sequence ):
@@ -1027,11 +1023,10 @@ def main():
     device = resolve_device( args.device, strict_device=args.strict_device )
     log( 'Using device: ' + device + ' (requested=' + str(args.device) + ')' )
     log( 'Input paths:' )
-    log( '  sculptor_dataset_root=' + args.sculptor_dataset_root )
-    log( '  sculptor_input_csv=' + args.sculptor_input_csv )
-    log( '  electrician_dataset_root=' + args.electrician_dataset_root )
-    log( '  cartographer_dataset_root=' + args.cartographer_dataset_root )
-    log( '  chronologer_db=' + args.chronologer_db )
+    log( '  sculptor_dataset_root=' + safe_text( args.sculptor_dataset_root ) )
+    log( '  electrician_dataset_root=' + safe_text( args.electrician_dataset_root ) )
+    log( '  cartographer_dataset_root=' + safe_text( args.cartographer_dataset_root ) )
+    log( '  chronologer_db=' + safe_text( args.chronologer_db ) )
 
     required_files = [ args.sculptor_model, args.electrician_model, args.cartographer_model, args.chronologer_model ]
     for path in required_files:
