@@ -124,6 +124,36 @@ CHRONOLOGER_SUPPORTED = set( [
 
 SCULPTOR_SUPPORTED = set( [ 'Unmodified' ] + sorted( set( UNIMOD_TO_MOD.values() ) - set( [ 'Pyro-Glu', 'TMT0', 'TMT6plex' ] ) ) )
 
+# Legacy Chronologer 2022 vocabulary/tokenization compatibility
+# (n_states == 45, i.e., 44 residue symbols + pad)
+LEGACY_CHRONOLOGER_RESIDUES = [ 'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
+                                'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y',
+                                'c', 'm', 'd', 'e', 's', 't', 'y', 'a', 'b', 'u',
+                                'n', 'o', 'p', 'q', 'r', 'x', 'z',
+                                '-', '^', '(', ')', '&', '*', '_', ]
+LEGACY_CHRONOLOGER_AA_TO_INT = dict( zip( LEGACY_CHRONOLOGER_RESIDUES, range( 1, len(LEGACY_CHRONOLOGER_RESIDUES) + 1 ) ) )
+LEGACY_CHRONOLOGER_MOD_REGEX_KEYS = {
+    r'M\[\+15\.99.{,6}\]' : 'm',
+    r'C\[\+57\.02.{,6}\]' : 'c',
+    r'C\[\+39\.99.{,6}\]' : 'd',
+    r'E\[\-18\.01.{,6}\]' : 'e',
+    r'Q\[\-17\.02.{,6}\]' : 'e',
+    r'S\[\+79\.96.{,6}\]' : 's',
+    r'T\[\+79\.96.{,6}\]' : 't',
+    r'Y\[\+79\.96.{,6}\]' : 'y',
+    r'K\[\+42\.01.{,6}\]' : 'a',
+    r'K\[\+100\.0.{,6}\]' : 'b',
+    r'K\[\+114\.0.{,6}\]' : 'u',
+    r'K\[\+14\.01.{,6}\]' : 'n',
+    r'K\[\+28\.03.{,6}\]' : 'o',
+    r'K\[\+42\.04.{,6}\]' : 'p',
+    r'R\[\+14\.01.{,6}\]' : 'q',
+    r'R\[\+28\.03.{,6}\]' : 'r',
+    r'K\[\+224\.1.{,6}\]' : 'z',
+    r'K\[\+229\.1.{,6}\]' : 'x',
+}
+LEGACY_CHRONOLOGER_NTERM_KEYS = { '+42.01' : '^', '+224.1' : '&', '+229.1' : '*' }
+
 
 class MSEStats( object ):
     def __init__( self ):
@@ -933,6 +963,42 @@ def read_chronologer_db( db_path ):
                       '. Tried tab and comma delimiters. Errors: ' + ' | '.join( errors ) )
 
 
+def legacy_chronologer_modseq_to_codedseq( seq ):
+    coded = str( seq )
+    for pattern, token in LEGACY_CHRONOLOGER_MOD_REGEX_KEYS.items():
+        coded = re.sub( pattern, token, coded )
+
+    if len( coded ) == 0:
+        return None
+
+    if coded[ 0 ] == 'd':
+        coded = ')' + coded
+    elif coded[ 0 ] == 'e':
+        coded = '(' + coded
+    elif coded[ 0 ] == '[':
+        key = coded[ 1:7 ]
+        if key not in LEGACY_CHRONOLOGER_NTERM_KEYS:
+            return None
+        coded = LEGACY_CHRONOLOGER_NTERM_KEYS[ key ] + coded[ coded.find( ']' ) + 1: ]
+    else:
+        coded = '-' + coded
+
+    coded = coded + '_'
+    if coded.count( '[' ) > 0:
+        return None
+    return coded
+
+
+def legacy_chronologer_codedseq_to_array( seq, max_size ):
+    seq_by_int = []
+    for char in seq:
+        if char not in LEGACY_CHRONOLOGER_AA_TO_INT:
+            raise KeyError( 'Legacy Chronologer token missing: ' + char )
+        seq_by_int.append( LEGACY_CHRONOLOGER_AA_TO_INT[ char ] )
+    seq_by_int += [ 0 ] * ( max_size - len( seq_by_int ) )
+    return np.asarray( seq_by_int, dtype='int64' )
+
+
 def evaluate_chronologer( args, device ):
     start_time = time.time()
     log( '[Chronologer] loading model and database' )
@@ -956,15 +1022,21 @@ def evaluate_chronologer( args, device ):
     eval_stats = MSEStats()
     by_mod_stats = defaultdict( MSEStats )
     skipped_tokenization = 0
+    skipped_too_long = 0
     skipped_vocab_mismatch = 0
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
     model_num_embeddings = int( model.seq_embed.num_embeddings )
     model_embed_dim = int( model.seq_embed.embedding_dim )
     model_vec_length = int( model.output.in_features // model_embed_dim ) if model_embed_dim > 0 else ( chronologer_max_len + 2 )
+    use_legacy_tokenizer = ( model_num_embeddings == ( len( LEGACY_CHRONOLOGER_RESIDUES ) + 1 ) )
     if model_vec_length != ( chronologer_max_len + 2 ):
         log( '[Chronologer] using checkpoint vec_length=' + str(model_vec_length) +
              ' (constants max_peptide_len+2=' + str(chronologer_max_len + 2) + ')' )
+    if use_legacy_tokenizer:
+        log( '[Chronologer] using legacy tokenizer mapping for n_states=' + str(model_num_embeddings) )
+    else:
+        log( '[Chronologer] using current tokenizer mapping for n_states=' + str(model_num_embeddings) )
 
     for seq in train_db[ 'PeptideModSeq' ].astype( str ):
         mod_occ = to_mod_occurrences_chronologer( seq )
@@ -996,6 +1068,7 @@ def evaluate_chronologer( args, device ):
             log( '[Chronologer] evaluated=' + str( processed_eval ) +
                  ' rmse=' + rmse_text +
                  ' skipped_tokenization=' + str( skipped_tokenization ) +
+                 ' skipped_too_long=' + str( skipped_too_long ) +
                  ' skipped_vocab_mismatch=' + str( skipped_vocab_mismatch ) )
             next_log += max( int( args.log_every ), 1 )
         seq_batch.clear()
@@ -1004,11 +1077,24 @@ def evaluate_chronologer( args, device ):
 
     for row in test_db.itertuples( index=False ):
         seq = str( row.PeptideModSeq )
-        coded = modseq_to_codedseq( seq )
+        if use_legacy_tokenizer:
+            coded = legacy_chronologer_modseq_to_codedseq( seq )
+        else:
+            coded = modseq_to_codedseq( seq )
         if coded is None:
             skipped_tokenization += 1
             continue
-        seq_tokens = codedseq_to_array_common( coded, max_size=model_vec_length )
+        if len( coded ) > model_vec_length:
+            skipped_too_long += 1
+            continue
+        try:
+            if use_legacy_tokenizer:
+                seq_tokens = legacy_chronologer_codedseq_to_array( coded, max_size=model_vec_length )
+            else:
+                seq_tokens = codedseq_to_array_common( coded, max_size=model_vec_length )
+        except Exception:
+            skipped_tokenization += 1
+            continue
         if int( np.max( seq_tokens ) ) >= model_num_embeddings:
             skipped_vocab_mismatch += 1
             continue
@@ -1026,6 +1112,7 @@ def evaluate_chronologer( args, device ):
     elapsed = time.time() - start_time
     log( '[Chronologer] complete in ' + format( elapsed, '.1f' ) + 's; evaluated=' + str( processed_eval ) +
          ' skipped_tokenization=' + str( skipped_tokenization ) +
+         ' skipped_too_long=' + str( skipped_too_long ) +
          ' skipped_vocab_mismatch=' + str( skipped_vocab_mismatch ) )
 
     return { 'model_name' : 'Chronologer',
@@ -1034,6 +1121,7 @@ def evaluate_chronologer( args, device ):
              'ptm_rmse' : { k : v.rmse() for k, v in by_mod_stats.items() if v.count > 0 },
              'n_eval_samples' : int( eval_stats.count ),
              'skipped_tokenization' : int( skipped_tokenization ),
+             'skipped_too_long' : int( skipped_too_long ),
              'skipped_vocab_mismatch' : int( skipped_vocab_mismatch ),
              'checkpoint_architecture' : checkpoint_arch,
              'db_delimiter' : db_delimiter,
