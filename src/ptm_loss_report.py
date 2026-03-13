@@ -1,5 +1,4 @@
 import argparse
-import csv
 import glob
 import json
 import math
@@ -14,7 +13,10 @@ import pandas as pd
 import pyarrow.parquet as pq
 import torch
 
+from chronologer_model import chronologer_model as chronologer_network
 from chronologer_model import initialize_chronologer_model
+from chronologer_settings import hyperparameters as chronologer_hyperparameters
+from chronologer_settings import training_parameters as chronologer_training_parameters
 from constants import max_peptide_len as chronologer_max_len
 from constants import seed as chronologer_seed
 from constants import validation_fraction as chronologer_validation_fraction
@@ -843,24 +845,126 @@ def split_chronologer_train_test( db ):
     return shuffled.iloc[ split_idx: ].copy(), shuffled.iloc[ :split_idx ].copy()
 
 
+def load_chronologer_state_dict( model_path, map_location='cpu' ):
+    state = torch.load( model_path, map_location=map_location )
+    if isinstance( state, dict ):
+        nested = state.get( 'state_dict', None )
+        if isinstance( nested, dict ):
+            state = nested
+    if not isinstance( state, dict ):
+        raise ValueError( 'Chronologer checkpoint does not contain a state_dict-like mapping' )
+    return state
+
+
+def infer_chronologer_arch_from_state_dict( state ):
+    seq_embed = state.get( 'seq_embed.weight', None )
+    output_weight = state.get( 'output.weight', None )
+    if seq_embed is None or output_weight is None:
+        return None
+    if len( seq_embed.shape ) != 2 or len( output_weight.shape ) != 2:
+        return None
+
+    n_states = int( seq_embed.shape[0] )
+    embed_dim = int( seq_embed.shape[1] )
+    output_inputs = int( output_weight.shape[1] )
+    if embed_dim <= 0 or output_inputs <= 0:
+        return None
+    if output_inputs % embed_dim != 0:
+        return None
+    vec_length = int( output_inputs // embed_dim )
+
+    block_ids = set()
+    kernel_size = None
+    for key, value in state.items():
+        if not key.startswith( 'resnet_blocks.' ):
+            continue
+        parts = key.split( '.' )
+        if len( parts ) < 3:
+            continue
+        try:
+            block_ids.add( int( parts[1] ) )
+        except Exception:
+            pass
+        if key.endswith( 'process_blocks.1.0.0.weight' ) and hasattr( value, 'shape' ) and len( value.shape ) == 3:
+            kernel_size = int( value.shape[-1] )
+
+    n_blocks = ( max( block_ids ) + 1 ) if len( block_ids ) > 0 else int( chronologer_hyperparameters.get( 'n_resnet_blocks', 3 ) )
+    if kernel_size is None:
+        kernel_size = int( chronologer_hyperparameters.get( 'kernel_size', 7 ) )
+
+    return { 'vec_length' : vec_length,
+             'n_states' : n_states,
+             'embed_dim' : embed_dim,
+             'n_blocks' : n_blocks,
+             'kernel_size' : kernel_size }
+
+
+def initialize_chronologer_from_checkpoint( state ):
+    arch = infer_chronologer_arch_from_state_dict( state )
+    if arch is None:
+        model = initialize_chronologer_model( model_file=None )
+        model.load_state_dict( state, strict=True )
+        return model, None
+
+    drop_rate = float( chronologer_training_parameters.get( 'dropout_rate', 0.1 ) )
+    act_fx = chronologer_hyperparameters.get( 'activation_function', 'relu' )
+    model = chronologer_network( arch[ 'vec_length' ],
+                                 arch[ 'n_states' ],
+                                 arch[ 'embed_dim' ],
+                                 arch[ 'n_blocks' ],
+                                 arch[ 'kernel_size' ],
+                                 drop_rate,
+                                 act_fx )
+    model.load_state_dict( state, strict=True )
+    return model, arch
+
+
+def read_chronologer_db( db_path ):
+    required_cols = [ 'PeptideModSeq', 'HI' ]
+    attempts = [ ( '\t', 'tab' ), ( ',', 'comma' ) ]
+    errors = []
+    for sep, label in attempts:
+        try:
+            db = pd.read_csv( db_path, sep=sep, usecols=required_cols )
+            return db, label
+        except Exception as exc:
+            errors.append( label + ': ' + str(exc) )
+    raise ValueError( 'Unable to parse Chronologer DB with required columns ' + str( required_cols ) +
+                      '. Tried tab and comma delimiters. Errors: ' + ' | '.join( errors ) )
+
+
 def evaluate_chronologer( args, device ):
     start_time = time.time()
     log( '[Chronologer] loading model and database' )
-    model = initialize_chronologer_model( model_file=None )
-    state = torch.load( args.chronologer_model, map_location='cpu' )
-    model.load_state_dict( state, strict=True )
+    state = load_chronologer_state_dict( args.chronologer_model, map_location='cpu' )
+    model, checkpoint_arch = initialize_chronologer_from_checkpoint( state )
+    if checkpoint_arch is not None:
+        log( '[Chronologer] inferred checkpoint architecture: ' +
+             'vec_length=' + str( checkpoint_arch[ 'vec_length' ] ) +
+             ', n_states=' + str( checkpoint_arch[ 'n_states' ] ) +
+             ', embed=' + str( checkpoint_arch[ 'embed_dim' ] ) +
+             ', blocks=' + str( checkpoint_arch[ 'n_blocks' ] ) +
+             ', kernel=' + str( checkpoint_arch[ 'kernel_size' ] ) )
     model = model.to( device )
     model.eval()
 
-    db = pd.read_csv( args.chronologer_db, sep='\t', usecols=[ 'PeptideModSeq', 'HI' ] )
+    db, db_delimiter = read_chronologer_db( args.chronologer_db )
+    log( '[Chronologer] parsed DB delimiter=' + db_delimiter )
     train_db, test_db = split_chronologer_train_test( db )
 
     train_counts = Counter()
     eval_stats = MSEStats()
     by_mod_stats = defaultdict( MSEStats )
     skipped_tokenization = 0
+    skipped_vocab_mismatch = 0
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
+    model_num_embeddings = int( model.seq_embed.num_embeddings )
+    model_embed_dim = int( model.seq_embed.embedding_dim )
+    model_vec_length = int( model.output.in_features // model_embed_dim ) if model_embed_dim > 0 else ( chronologer_max_len + 2 )
+    if model_vec_length != ( chronologer_max_len + 2 ):
+        log( '[Chronologer] using checkpoint vec_length=' + str(model_vec_length) +
+             ' (constants max_peptide_len+2=' + str(chronologer_max_len + 2) + ')' )
 
     for seq in train_db[ 'PeptideModSeq' ].astype( str ):
         mod_occ = to_mod_occurrences_chronologer( seq )
@@ -891,7 +995,8 @@ def evaluate_chronologer( args, device ):
             rmse_text = 'n/a' if current_rmse is None else format( current_rmse, '.6f' )
             log( '[Chronologer] evaluated=' + str( processed_eval ) +
                  ' rmse=' + rmse_text +
-                 ' skipped_tokenization=' + str( skipped_tokenization ) )
+                 ' skipped_tokenization=' + str( skipped_tokenization ) +
+                 ' skipped_vocab_mismatch=' + str( skipped_vocab_mismatch ) )
             next_log += max( int( args.log_every ), 1 )
         seq_batch.clear()
         true_batch.clear()
@@ -903,7 +1008,10 @@ def evaluate_chronologer( args, device ):
         if coded is None:
             skipped_tokenization += 1
             continue
-        seq_tokens = codedseq_to_array_common( coded, max_size=chronologer_max_len + 2 )
+        seq_tokens = codedseq_to_array_common( coded, max_size=model_vec_length )
+        if int( np.max( seq_tokens ) ) >= model_num_embeddings:
+            skipped_vocab_mismatch += 1
+            continue
         mod_occ = to_mod_occurrences_chronologer( seq )
 
         seq_batch.append( seq_tokens )
@@ -917,7 +1025,8 @@ def evaluate_chronologer( args, device ):
 
     elapsed = time.time() - start_time
     log( '[Chronologer] complete in ' + format( elapsed, '.1f' ) + 's; evaluated=' + str( processed_eval ) +
-         ' skipped_tokenization=' + str( skipped_tokenization ) )
+         ' skipped_tokenization=' + str( skipped_tokenization ) +
+         ' skipped_vocab_mismatch=' + str( skipped_vocab_mismatch ) )
 
     return { 'model_name' : 'Chronologer',
              'average_rmse' : eval_stats.rmse(),
@@ -925,6 +1034,9 @@ def evaluate_chronologer( args, device ):
              'ptm_rmse' : { k : v.rmse() for k, v in by_mod_stats.items() if v.count > 0 },
              'n_eval_samples' : int( eval_stats.count ),
              'skipped_tokenization' : int( skipped_tokenization ),
+             'skipped_vocab_mismatch' : int( skipped_vocab_mismatch ),
+             'checkpoint_architecture' : checkpoint_arch,
+             'db_delimiter' : db_delimiter,
              'holdout_policy' : ( 'Random split following training code: '
                                   'shuffle random_state=' + str(chronologer_seed) +
                                   ', test_fraction=' + str(chronologer_validation_fraction) ),
@@ -1037,10 +1149,11 @@ def main():
         raise FileNotFoundError( 'Chronologer DB not found: ' + args.chronologer_db )
 
     results = {}
+    # Keep Cartographer last because it is the slowest pass; this fails faster on other models.
     results[ 'Sculptor' ] = evaluate_sculptor( args, device )
     results[ 'Electrician' ] = evaluate_electrician( args, device )
-    results[ 'Cartographer' ] = evaluate_cartographer( args, device )
     results[ 'Chronologer' ] = evaluate_chronologer( args, device )
+    results[ 'Cartographer' ] = evaluate_cartographer( args, device )
 
     table_rows = build_table( results )
     markdown = build_markdown( results, table_rows )

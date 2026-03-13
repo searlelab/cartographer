@@ -8,6 +8,7 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 import torch
 from torch.utils.data import DataLoader
 
+from constants import train_fdr
 from sculptor_loader import SculptorCCSDataset, discover_split_files
 from sculptor_loss import CCS_HuberLoss
 from sculptor_model import initialize_sculptor_model
@@ -65,6 +66,10 @@ def parse_args( args ):
                          type=int,
                          default=4096,
                          help='Batch size used for denormalized test MAE/RMSE reporting' )
+    parser.add_argument( '--fdr',
+                         type=float,
+                         default=train_fdr,
+                         help='Batch outlier rejection threshold for Sculptor loss (default: 0.01)' )
     return parser.parse_args( args )
 
 
@@ -129,8 +134,11 @@ def train_sculptor( dataset_root,
                     n_epochs=None,
                     arch_overrides=None,
                     metadata_file=None,
-                    eval_batch_size=4096, ):
+                    eval_batch_size=4096,
+                    fdr=train_fdr, ):
     print( 'Sculptor training initiated' )
+    if fdr <= 0.0 or fdr >= 1.0:
+        raise ValueError( 'fdr must be in (0, 1)' )
 
     metadata, metadata_path = load_metadata( dataset_root, metadata_file )
     ccs_mean = float( metadata[ 'train_ccs_mean' ] )
@@ -163,7 +171,7 @@ def train_sculptor( dataset_root,
     model = initialize_sculptor_model( model_file=model_file,
                                        arch_overrides=arch_overrides )
 
-    loss_fx = CCS_HuberLoss()
+    loss_fx = CCS_HuberLoss( fdr=fdr )
 
     optimizer = training_parameters[ 'optimizer' ]( list( model.parameters() ),
                                                     lr=training_parameters[ 'learning_rate' ] )
@@ -229,7 +237,8 @@ def main():
                     n_epochs=args.n_epochs,
                     arch_overrides=None,
                     metadata_file=args.metadata_file,
-                    eval_batch_size=args.eval_batch_size )
+                    eval_batch_size=args.eval_batch_size,
+                    fdr=args.fdr )
 
 
 if __name__ == '__main__':
