@@ -1,40 +1,69 @@
-# CLAUDE.md
+# AGENTS.md
+Agent guidance for this repository.
 
-## Collaboration rules (follow strictly)
-1. Before making any major change (API changes, refactors, moving files, changing build/test wiring, modifying data formats), propose a plan in 3 to 7 bullet points and wait for confirmation.
-2. Do not speculate about code you have not opened. If a conclusion depends on specific behavior, open and read the relevant files first (source, tests, build config, scripts).
-3. Prefer the simplest solution that solves the problem. Avoid cleverness, deep refactors, and broad rewrites unless explicitly requested.
-4. Minimize blast radius:
-   - Change the fewest files possible.
-   - Keep diffs small and easy to review.
-   - Prefer additive changes over rewiring existing behavior.
-5. When you make a claim about behavior, include the evidence path: file names and the exact methods or sections you relied on.
+## Read-first
+- Before making changes, read `README.md` at least once to understand architecture, module boundaries, and existing patterns.
 
-## How to investigate (do this before coding)
-1. Identify the entry points and interfaces involved.
-2. Read the current implementation and existing tests that exercise it.
-3. Search for references (prefer LSP if available, otherwise grep/ripgrep).
-4. If behavior is unclear, create or extend a small test that demonstrates current behavior before changing it.
+## Repo layout (high level)
+- Single Python project with script-style modules in `src/`.
+- Model families (entrypoints + settings + export):
+  - `cartographer_*`: MS2 fragment intensity prediction.
+  - `electrician_*`: precursor charge distribution prediction.
+  - `sculptor_*`: CCS regression + dataset preparation + architecture sweeps.
+  - `chronologer_*`: retention-time model/training.
+- Shared infrastructure:
+  - `core_layers.py`, `training_loop.py`: shared network/training primitives.
+  - `tensorize.py`, `sculptor_tensorize.py`: sequence/token/modification encoding.
+  - `prospect_loader.py`, `sculptor_loader.py`: parquet-backed iterable datasets.
+- Supporting assets:
+  - `configs/`: architecture design JSONs for sweep workflows.
+  - `models/`: trained checkpoints, TorchScript exports, preprocessing metadata.
+  - `fasta/`: FASTA fixtures for library-generation paths.
 
-## Coding standards (match the repository)
-1. Preserve formatting and conventions already present in nearby files.
-   - Follow existing indentation and brace style (this repo commonly uses tabs and K&R braces).
-   - Do not reformat unrelated code.
-2. Preserve and maintain comments:
-   - Keep existing comments unless they are incorrect.
-   - Update comments when behavior changes.
-   - Use the same comment style as nearby code (JavaDoc blocks for public classes and core components, concise `//` comments for local intent).
-3. Documentation:
-   - If the repo has a documentation file or folder (README, docs, etc.), keep additions consistent in tone and structure.
-   - When a change affects user-visible behavior, formats, CLI flags, configuration, or build steps, update documentation in the same style as existing docs.
+## Build and test commands
+### Fast syntax compile (all Python modules)
+python -m py_compile src/*.py
 
-## Change management expectations
-1. Every change should include a rationale and a verification step.
-2. Prefer tests that already exist. Add a new test only when necessary, keep it minimal and focused.
-3. If a task spans multiple languages (Java plus native/.NET/Rust/scripts), keep the boundaries explicit:
-   - Do not change cross-language interfaces without first showing the plan and getting confirmation.
-   - Verify assumptions by reading the relevant bridge points (JNI bindings, CLI contracts, schemas, scripts).
+## What “good autonomy” looks like
+- Prefer changes in the smallest relevant `src/` modules; avoid broad rewrites across model families unless requested.
+- Reuse existing code paths and utilities, especially tokenizers, dataset loaders, export metadata builders, and `train_model`.
+- Do not speculate about code you have not opened. If a conclusion depends on specific behavior, open and read the relevant files first (source, tests, build config, scripts).
+-  Minimize blast radius:
+  - Change the fewest files possible.
+  - Keep diffs small and easy to review.
+  - Prefer additive changes over rewiring existing behavior.
+- Make success checkable:
+  - Add or update a runnable test (prefer focused `pytest` tests for pure functions / parsing logic).
+  - If no test harness exists for the path, add a deterministic smoke check (CLI `--help`, `--dry_run`, `--max_rows`, or export validation).
+  - Ensure outputs are deterministic (stable sorting, fixed seeds, hash-based splits, explicit tolerances).
 
-## Communication conventions
-- If you are blocked due to missing fixtures, missing external tools, or ambiguous requirements, explain exactly what you checked and what is missing, then offer the smallest next step.
-- When proposing alternatives, list tradeoffs briefly and recommend the option that best matches existing patterns in the repo.
+## Coding standards
+- Preserve formatting and conventions already present in nearby files.
+- This repo mixes styles (e.g., spaced calls like `foo( x )`, occasional tabs, and newer PEP8-style files); match local style and do not reformat unrelated code.
+- Preserve and maintain comments, update comments when behavior changes and use the same comment style as nearby code.
+- Keep the existing script pattern where used: `parse_args(...)`, `main()`, and `if __name__ == '__main__':`.
+
+## Design and data-contract rules
+- Keep model construction centralized in `initialize_*_model` functions; avoid duplicating architecture assembly in trainers/exporters.
+- Keep tokenizer and export metadata in sync:
+  - Cartographer/Electrician: update both `tensorize.py` and `export_*` metadata when vocab or mod mappings change.
+  - Sculptor: update both `sculptor_tensorize.py` and `export_sculptor.py` metadata when vocab or UNIMOD mappings change.
+- Preserve parquet/data contracts expected by loaders and trainers (column names, tensor shapes, and split naming: `train-*.parquet`, `test-*.parquet`).
+- Prefer relative/project-local defaults for new paths and expose configurable paths through CLI flags.
+
+## Training and evaluation rules
+- Keep `'auto'` device behavior aligned with `training_loop.resolve_device` (MPS -> CUDA -> CPU).
+- Preserve checkpoint safety behavior (do not overwrite source checkpoint when resuming).
+- For long-running training/sweep flows, prefer resumable, inspectable outputs (explicit output dirs, per-run checkpoints, summary CSV/markdown/log artifacts).
+
+## Dependencies and tooling boundaries
+- Requirements in `README.md` are the source of truth (Python 3.10+, PyTorch, NumPy, PyArrow).
+- Do not introduce new dependencies, build systems, or codegen steps unless explicitly requested.
+- Keep heavy generated artifacts (large checkpoints/logs) out of source diffs unless the task explicitly asks for them.
+
+## Final output expectation
+Always attempt to run at least one Python validation command before finishing (prefer `python -m py_compile src/*.py`, plus targeted smoke/tests when relevant). When done, report:
+- Commands you ran (including focused tests and/or full tests)
+- What changed (files/modules/scripts)
+- How correctness was verified (tests, smoke checks, fixtures, or export validation)
+- When you make a claim about behavior, include the evidence path: file names and the exact methods or sections you relied on.
