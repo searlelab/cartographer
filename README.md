@@ -51,11 +51,11 @@ This produces two files alongside the model:
 ## Supported Modifications
 
 Values are `%RMSE vs model average RMSE` on each model holdout/test set.
-`:white_check_mark:` indicates `<120%` and `>1000` PTM occurrences in that model's training split; otherwise `:warning:`.
+`:white_check_mark:` indicates `<120%` and `>1000` PTM occurrences in that model's training data; otherwise `:warning:`.
 `Obs` columns are unique modified peptide sequence observations across each model's combined train+test data, collapsed across charge state and NCE.
 Rows are reverse-sorted by average `Obs` across the four models (with model-overlap as a secondary sort).
 
-| Modification | Sites | UNIMOD | Chronologer | Cartographer | Electrician | Sculptor | Chronologer Obs | Cartographer Obs | Electrician Obs | Sculptor Obs |
+| Modification | Sites | UNIMOD | Chronologer Accuracy | Cartographer Accuracy | Electrician Accuracy | Sculptor Accuracy | Chronologer Peptides | Cartographer Peptides | Electrician Peptides | Sculptor Peptides |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Unmodified | - | - | :white_check_mark: 79.1% | :white_check_mark: 100.4% | :white_check_mark: 112.1% | :white_check_mark: 99.4% | 1,548,115 | 728,296 | 513,462 | 1,063,679 |
 | TMT6plex | K, N-term | 737 | :warning: 150.7% | :white_check_mark: 97.6% | :white_check_mark: 83.9% | N/A | 166,178 | 529,626 | 526,902 | 0 |
@@ -70,7 +70,7 @@ Rows are reverse-sorted by average `Obs` across the four models (with model-over
 | HexNAc | N, S, T | 43 | N/A | :white_check_mark: 88.9% | :warning: 144.5% | :warning: 106.4% | 0 | 2,847 | 2,990 | 99 |
 | Malonyl | K | 747 | N/A | N/A | N/A | :white_check_mark: 67.3% | 0 | 0 | 0 | 4,173 |
 | TMT0 | K, N-term | 739 | :warning: 148.2% | N/A | N/A | N/A | 2,515 | 0 | 0 | 0 |
-| Succinyl | K | 64 | :warning: 42.5% | N/A | N/A | :warning: 75.3% | 1,125 | 0 | 0 | 199 |
+| Succinyl | K | 64 | :white_check_mark: 42.5% | N/A | N/A | :warning: 75.3% | 1,125 | 0 | 0 | 199 |
 | Dimethyl | K, R | 36 | :warning: 308.9% | N/A | N/A | :warning: 88.8% | 137 | 0 | 0 | 323 |
 | Cysteinyl | C | 312 | N/A | N/A | N/A | :warning: 65.6% | 0 | 0 | 0 | 427 |
 | Trimethyl | K | 37 | :warning: 445.1% | N/A | N/A | :warning: 64.0% | 39 | 0 | 0 | 177 |
