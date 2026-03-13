@@ -55,6 +55,7 @@ class TrainerValInclusionTest( unittest.TestCase ):
             self.assertEqual( datasets[ 'train' ].files,
                               [ 'train-000.parquet', 'val-000.parquet' ] )
             self.assertEqual( datasets[ 'test' ].files, [ 'test-000.parquet' ] )
+            self.assertEqual( kwargs.get( 'patience' ), 3 )
             return 0.123
 
         with mock.patch.object( cartographer_trainer,
@@ -86,6 +87,7 @@ class TrainerValInclusionTest( unittest.TestCase ):
                                                             '/tmp/out.pt',
                                                             device='cpu',
                                                             num_workers=0,
+                                                            patience=3,
                                                             n_epochs=1 )
 
         self.assertAlmostEqual( loss, 0.123, places=6 )

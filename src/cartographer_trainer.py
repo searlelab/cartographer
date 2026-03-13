@@ -90,6 +90,10 @@ def parse_args(args):
                         type=str,
                         help='TSV file to log PRTC peptide predictions each epoch',
                         default=None)
+    parser.add_argument('--patience',
+                        type=int,
+                        help='Early stopping: exit if no improvement for this many epochs',
+                        default=None)
     parser.add_argument('--model_file',
                         type=str,
                         help='Path to a .pt state dict to resume from (default: train from scratch)',
@@ -106,7 +110,7 @@ def parse_args(args):
 
 
 def train_cartographer( dataset_root, output_file_name, device='auto', num_workers=0,
-                        prtc_report=None, model_file=None, start_epoch=1, n_epochs=None, ):
+                        prtc_report=None, patience=None, model_file=None, start_epoch=1, n_epochs=None, ):
     print( 'Cartographer training initiated' )
 
     # Discover pre-split parquet shards
@@ -168,6 +172,7 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
                               progress_tick_rows=progress_tick_rows,
                               num_workers=num_workers,
                               epoch_callback=epoch_callback,
+                              patience=patience,
                               start_epoch=start_epoch, )
     return final_loss
 
@@ -187,6 +192,7 @@ def main():
     train_cartographer( args.dataset_root, model_out_file,
                         device=args.device, num_workers=args.num_workers,
                         prtc_report=args.prtc_report,
+                        patience=args.patience,
                         model_file=args.model_file,
                         start_epoch=args.start_epoch,
                         n_epochs=args.n_epochs, )
