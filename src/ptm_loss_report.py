@@ -1199,15 +1199,28 @@ def build_markdown(results_by_model, table_rows):
 
 
 def write_json(output_path, payload):
-    os.makedirs( os.path.dirname( output_path ), exist_ok=True )
-    with open( output_path, 'w' ) as f:
+    output_dir = os.path.dirname( output_path )
+    if output_dir != '':
+        os.makedirs( output_dir, exist_ok=True )
+    with open( output_path, 'w', encoding='utf-8' ) as f:
         json.dump( payload, f, indent=2 )
 
 
 def write_text(output_path, text):
-    os.makedirs( os.path.dirname( output_path ), exist_ok=True )
-    with open( output_path, 'w' ) as f:
+    output_dir = os.path.dirname( output_path )
+    if output_dir != '':
+        os.makedirs( output_dir, exist_ok=True )
+    with open( output_path, 'w', encoding='utf-8', newline='\n' ) as f:
         f.write( text )
+
+
+def safe_console_text( text ):
+    encoding = getattr( os.sys.stdout, 'encoding', None ) or 'utf-8'
+    try:
+        text.encode( encoding )
+        return text
+    except Exception:
+        return text.encode( encoding, errors='replace' ).decode( encoding, errors='replace' )
 
 
 def main():
@@ -1259,7 +1272,7 @@ def main():
     log( 'Wrote JSON: ' + safe_abs_path( args.output_json ) )
     log( 'Wrote Markdown: ' + safe_abs_path( args.output_markdown ) )
     log( 'Total runtime: ' + format( elapsed_total, '.1f' ) + 's' )
-    print( '\n' + markdown )
+    print( '\n' + safe_console_text( markdown ) )
 
 
 if __name__ == '__main__':
