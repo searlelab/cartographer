@@ -508,6 +508,14 @@ def discover_split_files( dataset_root, split ):
     return sorted( glob.glob( pattern ) )
 
 
+def discover_fit_and_test_files( dataset_root ):
+    train_files = discover_split_files( dataset_root, 'train' )
+    val_files = discover_split_files( dataset_root, 'val' )
+    fit_files = list( train_files ) + list( val_files )
+    test_files = discover_split_files( dataset_root, 'test' )
+    return train_files, val_files, fit_files, test_files
+
+
 def load_electrician_arch_overrides( model_path ):
     json_path = os.path.splitext( model_path )[0] + '.preprocessing.json'
     if not os.path.isfile( json_path ):
@@ -548,10 +556,14 @@ def evaluate_sculptor( args, device ):
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
 
-    train_files = discover_split_files( args.sculptor_dataset_root, 'train' )
-    test_files = discover_split_files( args.sculptor_dataset_root, 'test' )
+    train_files, val_files, fit_files, test_files = discover_fit_and_test_files( args.sculptor_dataset_root )
     if len( train_files ) == 0 or len( test_files ) == 0:
-        raise RuntimeError( 'Missing Sculptor train/test parquet files under ' + args.sculptor_dataset_root )
+        raise RuntimeError( 'Missing Sculptor parquet files under ' + args.sculptor_dataset_root +
+                            ' (requires train/test; val is optional)' )
+    log( '[Sculptor] split shards: train=' + str(len(train_files)) +
+         ' val=' + str(len(val_files)) +
+         ' fit=' + str(len(fit_files)) +
+         ' test=' + str(len(test_files)) )
 
     seq_batch = []
     charge_batch = []
@@ -588,8 +600,8 @@ def evaluate_sculptor( args, device ):
         true_ccs_batch.clear()
         mods_batch.clear()
 
-    for i, path in enumerate( train_files ):
-        log( '[Sculptor] counting train PTMs file ' + str(i + 1) + '/' + str( len(train_files) ) +
+    for i, path in enumerate( fit_files ):
+        log( '[Sculptor] counting fit PTMs file ' + str(i + 1) + '/' + str( len(fit_files) ) +
              ': ' + os.path.basename( path ) )
         pf = pq.ParquetFile( path )
         for rg_idx in range( pf.metadata.num_row_groups ):
@@ -659,13 +671,17 @@ def evaluate_electrician( args, device ):
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
 
-    train_files = discover_split_files( args.electrician_dataset_root, 'train' )
-    test_files = discover_split_files( args.electrician_dataset_root, 'test' )
+    train_files, val_files, fit_files, test_files = discover_fit_and_test_files( args.electrician_dataset_root )
     if len( train_files ) == 0 or len( test_files ) == 0:
-        raise RuntimeError( 'Missing Electrician train/test parquet files under ' + args.electrician_dataset_root )
+        raise RuntimeError( 'Missing Electrician parquet files under ' + args.electrician_dataset_root +
+                            ' (requires train/test; val is optional)' )
+    log( '[Electrician] split shards: train=' + str(len(train_files)) +
+         ' val=' + str(len(val_files)) +
+         ' fit=' + str(len(fit_files)) +
+         ' test=' + str(len(test_files)) )
 
-    for i, path in enumerate( train_files ):
-        log( '[Electrician] counting train PTMs file ' + str(i + 1) + '/' + str( len(train_files) ) +
+    for i, path in enumerate( fit_files ):
+        log( '[Electrician] counting fit PTMs file ' + str(i + 1) + '/' + str( len(fit_files) ) +
              ': ' + os.path.basename( path ) )
         pf = pq.ParquetFile( path )
         for rg_idx in range( pf.metadata.num_row_groups ):
@@ -762,13 +778,17 @@ def evaluate_cartographer( args, device ):
     processed_eval = 0
     next_log = max( int( args.log_every ), 1 )
 
-    train_files = discover_split_files( args.cartographer_dataset_root, 'train' )
-    test_files = discover_split_files( args.cartographer_dataset_root, 'test' )
+    train_files, val_files, fit_files, test_files = discover_fit_and_test_files( args.cartographer_dataset_root )
     if len( train_files ) == 0 or len( test_files ) == 0:
-        raise RuntimeError( 'Missing Cartographer train/test parquet files under ' + args.cartographer_dataset_root )
+        raise RuntimeError( 'Missing Cartographer parquet files under ' + args.cartographer_dataset_root +
+                            ' (requires train/test; val is optional)' )
+    log( '[Cartographer] split shards: train=' + str(len(train_files)) +
+         ' val=' + str(len(val_files)) +
+         ' fit=' + str(len(fit_files)) +
+         ' test=' + str(len(test_files)) )
 
-    for i, path in enumerate( train_files ):
-        log( '[Cartographer] counting train PTMs file ' + str(i + 1) + '/' + str( len(train_files) ) +
+    for i, path in enumerate( fit_files ):
+        log( '[Cartographer] counting fit PTMs file ' + str(i + 1) + '/' + str( len(fit_files) ) +
              ': ' + os.path.basename( path ) )
         pf = pq.ParquetFile( path )
         for rg_idx in range( pf.metadata.num_row_groups ):
@@ -1172,7 +1192,7 @@ def build_markdown(results_by_model, table_rows):
     lines.append( '## Supported Modifications' )
     lines.append( '' )
     lines.append( 'Values are `%RMSE vs model average RMSE` on each model holdout/test set.' )
-    lines.append( "`✅` indicates `<120%` and `>1000` PTM occurrences in that model's training split; otherwise `⚠️`." )
+    lines.append( "`✅` indicates `<120%` and `>1000` PTM occurrences in that model's fit split (`train + optional val`); otherwise `⚠️`." )
     lines.append( '' )
 
     headers = [ 'Modification', 'Sites', 'UNIMOD', 'Chronologer', 'Cartographer', 'Electrician', 'Sculptor' ]

@@ -69,7 +69,7 @@ def parse_args(args):
     parser.add_argument('--dataset_root',
                         type=str,
                         required=True,
-                        help='Path to prospect-ptms-ms2 dataset directory')
+                        help='Path to prospect-ptms-ms2 dataset directory with data/train-*.parquet, optional data/val-*.parquet, and data/test-*.parquet')
     parser.add_argument('--output_file',
                         type=str,
                         help='Model filename',
@@ -111,13 +111,22 @@ def train_cartographer( dataset_root, output_file_name, device='auto', num_worke
 
     # Discover pre-split parquet shards
     train_files = discover_split_files( dataset_root, 'train' )
+    val_files = discover_split_files( dataset_root, 'val' )
     test_files = discover_split_files( dataset_root, 'test' )
+    fit_files = train_files + val_files
+
     print( 'Found ' + str(len(train_files)) + ' train shards, ' +
+           str(len(val_files)) + ' val shards, ' +
            str(len(test_files)) + ' test shards' )
+    if len(val_files) > 0:
+        print( 'Using train + val shards for fitting; test shards for evaluation.' )
+    else:
+        print( 'No val shards found; using train shards only for fitting.' )
+
     assert len(train_files) > 0, 'No train parquet files found in ' + dataset_root
     assert len(test_files) > 0, 'No test parquet files found in ' + dataset_root
 
-    datasets = { 'train' : ProspectMS2Dataset( train_files, shuffle_files=True ),
+    datasets = { 'train' : ProspectMS2Dataset( fit_files, shuffle_files=True ),
                  'test'  : ProspectMS2Dataset( test_files,  shuffle_files=False ), }
     print( 'Datasets created' )
 

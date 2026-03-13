@@ -25,7 +25,7 @@ def parse_args( args ):
     parser.add_argument( '--dataset_root',
                          type=str,
                          required=True,
-                         help='Path to Sculptor dataset root containing data/train-*.parquet and metadata JSON' )
+                         help='Path to Sculptor dataset root containing data/train-*.parquet, optional data/val-*.parquet, data/test-*.parquet, and metadata JSON' )
     parser.add_argument( '--output_file',
                          type=str,
                          default=default_out_filename,
@@ -151,15 +151,22 @@ def train_sculptor( dataset_root,
            ', std=' + format( ccs_std, '.6f' ) )
 
     train_files = discover_split_files( dataset_root, 'train' )
+    val_files = discover_split_files( dataset_root, 'val' )
     test_files = discover_split_files( dataset_root, 'test' )
+    fit_files = train_files + val_files
 
     print( 'Found ' + str(len(train_files)) + ' train shards, ' +
+           str(len(val_files)) + ' val shards, ' +
            str(len(test_files)) + ' test shards' )
+    if len(val_files) > 0:
+        print( 'Using train + val shards for fitting; test shards for evaluation.' )
+    else:
+        print( 'No val shards found; using train shards only for fitting.' )
 
     assert len( train_files ) > 0, 'No train parquet files found in ' + dataset_root
     assert len( test_files ) > 0, 'No test parquet files found in ' + dataset_root
 
-    datasets = { 'train' : SculptorCCSDataset( train_files,
+    datasets = { 'train' : SculptorCCSDataset( fit_files,
                                                ccs_mean,
                                                ccs_std,
                                                shuffle_files=True ),

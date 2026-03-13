@@ -102,7 +102,7 @@ def parse_args( args ):
     parser.add_argument( '--dataset_root',
                          type=str,
                          default=DEFAULT_DATASET_ROOT,
-                         help='Path to prospect-ptms-charge root directory' )
+                         help='Path to prospect-ptms-charge root directory with data/train-*.parquet, optional data/val-*.parquet, and data/test-*.parquet' )
     parser.add_argument( '--device',
                          type=str,
                          default='mps',
@@ -384,7 +384,9 @@ def main():
         pass
 
     train_files = discover_split_files( args.dataset_root, 'train' )
+    val_files = discover_split_files( args.dataset_root, 'val' )
     test_files = discover_split_files( args.dataset_root, 'test' )
+    fit_files = train_files + val_files
     if len( train_files ) == 0:
         raise RuntimeError( 'No train parquet shards found under ' + args.dataset_root )
     if len( test_files ) == 0:
@@ -394,15 +396,24 @@ def main():
     if args.max_designs is not None:
         designs = designs[ :args.max_designs ]
 
-    log.log( 'Training device: ' + args.device + ' | Epoch test-phase device: cpu | Final benchmark device: cpu' )
+    log.log( 'Training device: ' + args.device +
+             ' | Epoch test-phase device: ' + args.device +
+             ' | Final benchmark device: cpu' )
     log.log( 'Dataset root: ' + args.dataset_root )
-    log.log( 'Train shards: ' + str(len(train_files)) + ' | Test shards: ' + str(len(test_files)) )
+    log.log( 'Train shards: ' + str(len(train_files)) + ' | Val shards: ' + str(len(val_files)) +
+             ' | Test shards: ' + str(len(test_files)) )
+    if len(val_files) > 0:
+        log.log( 'Using train + val shards for fitting; test shards for evaluation.' )
+    else:
+        log.log( 'No val shards found; using train shards only for fitting.' )
     log.log( 'Design count: ' + str(len(designs)) + ' | Replicates: ' + str(args.n_replicates) +
              ' | Epochs: ' + str(args.n_epochs) )
 
     run_config = { 'timestamp' : timestamp,
                    'args' : vars( args ),
                    'train_shards' : train_files,
+                   'val_shards' : val_files,
+                   'fit_shards' : fit_files,
                    'test_shards' : test_files,
                    'designs' : designs, }
     with open( os.path.join( run_dir, 'run_config.json' ), 'w' ) as f:
@@ -444,7 +455,7 @@ def main():
             try:
                 set_all_seeds( rep_seed )
 
-                datasets = { 'train' : ProspectChargeDataset( train_files, shuffle_files=True ),
+                datasets = { 'train' : ProspectChargeDataset( fit_files, shuffle_files=True ),
                              'test' : ProspectChargeDataset( test_files, shuffle_files=False ), }
 
                 model = initialize_electrician_model( arch_overrides=arch )
@@ -462,7 +473,7 @@ def main():
                                             optimizer,
                                             args.n_epochs,
                                             args.device,
-                                            'cpu',
+                                            args.device,
                                             checkpoint,
                                             progress_tick_rows=progress_tick_rows,
                                             num_workers=args.num_workers_train,

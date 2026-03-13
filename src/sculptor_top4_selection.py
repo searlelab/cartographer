@@ -18,7 +18,7 @@ def parse_args( args ):
     parser.add_argument( '--dataset_root',
                          type=str,
                          required=True,
-                         help='Path to Sculptor dataset root' )
+                         help='Path to Sculptor dataset root with data/train-*.parquet, optional data/val-*.parquet, and data/test-*.parquet' )
     parser.add_argument( '--output_dir',
                          type=str,
                          default=os.path.join( repo_dir, 'models', 'sculptor_top4_sweeps', timestamp ),

@@ -110,7 +110,7 @@ def parse_args( args ):
     parser.add_argument( '--dataset_root',
                          type=str,
                          required=True,
-                         help='Path to Sculptor dataset root directory' )
+                         help='Path to Sculptor dataset root directory with data/train-*.parquet, optional data/val-*.parquet, and data/test-*.parquet' )
     parser.add_argument( '--output_file',
                          type=str,
                          default=default_out_filename,

@@ -16,7 +16,7 @@ It currently supports HCD fragmentation and predicts six ion channels (y+1, y+2,
 
 ## Training
 
-Cartographer trains on parquet shards. Download datasets and point `--dataset_root` at the top-level directory containing the `data/` folder with `train-*.parquet` and `test-*.parquet` files.
+Cartographer trains on parquet shards. Download datasets and point `--dataset_root` at the top-level directory containing the `data/` folder with `train-*.parquet`, optional `val-*.parquet`, and `test-*.parquet` files.
 
 ```
 python src/cartographer_trainer.py --dataset_root /path/to/prospect-ptms-ms2 \
@@ -35,6 +35,7 @@ python src/cartographer_trainer.py --dataset_root /path/to/prospect-ptms-ms2 \
 | `--prtc_report` | *none* | TSV file to log PRTC peptide predictions per epoch |
 
 The `auto` device setting selects MPS (Apple Silicon), CUDA, or CPU in that order.
+When `val-*.parquet` files are present, Cartographer/Electrician/Sculptor/Chronologer trainers fit on `train + val` and evaluate/checkpoint on `test`.
 
 ## Exporting
 

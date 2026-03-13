@@ -21,7 +21,7 @@ def parse_args( args ):
     parser.add_argument('--dataset_root',
                         type=str,
                         required=True,
-                        help='Path to prospect-ptms-charge dataset directory')
+                        help='Path to prospect-ptms-charge dataset directory with data/train-*.parquet, optional data/val-*.parquet, and data/test-*.parquet')
     parser.add_argument('--output_file',
                         type=str,
                         help='Model filename',
