@@ -33,6 +33,10 @@ def train_model( model,
                  progress_tick_rows=0,
                  num_workers=0,
                  epoch_callback=None,
+                 batch_callback=None,
+                 checkpoint_metric_callback=None,
+                 report_epoch_loss=True,
+                 checkpoint_phase='test',
                  patience=None,
                  start_epoch=1, ):
 
@@ -122,29 +126,50 @@ def train_model( model,
                                 sys.stdout.write( ' ' )
                             sys.stdout.flush()
 
+                    if batch_callback is not None:
+                        batch_callback( model=model,
+                                        epoch=epoch,
+                                        phase=phase,
+                                        batch_index=i + 1,
+                                        batch_size=batch_size,
+                                        batch_loss=float( loss.item() ),
+                                        device=devices[ phase ] )
+
                 # statistics
-                running_loss += loss.item() * batch_size
-                total_samples += batch_size
+                if report_epoch_loss:
+                    running_loss += loss.item() * batch_size
+                    total_samples += batch_size
 
             # End of phase newline after ticks
             if phase == 'train' and progress_tick_rows > 0 and tick_count > 0:
                 print()
 
-            epoch_loss = running_loss / total_samples
+            epoch_loss = None
+            if report_epoch_loss:
+                epoch_loss = running_loss / total_samples
             runtime = time.time() - s_time
-            print( phase.capitalize() + format( epoch_loss, '.4f' ).rjust(8) )
+            if report_epoch_loss:
+                print( phase.capitalize() + format( epoch_loss, '.4f' ).rjust(8) )
 
+            checkpoint_loss = epoch_loss
+            checkpoint_label = 'loss'
+            if phase == checkpoint_phase and checkpoint_metric_callback is not None:
+                checkpoint_loss, checkpoint_label = checkpoint_metric_callback( model=model,
+                                                                               dataset=datasets[ phase ],
+                                                                               phase=phase,
+                                                                               device=devices[ phase ],
+                                                                               epoch=epoch,
+                                                                               epoch_loss=epoch_loss )
+                print( 'Checkpoint ' + checkpoint_label + ': ' + format( float(checkpoint_loss), '.6f' ) )
 
-
-
-            if phase == 'test':
+            if phase == checkpoint_phase:
                 #MAEs = loss_fx.source_b.weight.cpu().detach().numpy().tolist()[0]
                 #for t, learned_mae in enumerate( MAEs ):
                 #    print( '\t' + unique_sources[t].ljust(25) + format(learned_mae,'.3f') )
-                if epoch_loss < best_loss-tolerance:
+                if checkpoint_loss < best_loss-tolerance:
                     print("New best weights! Copying and saving model")
                     best_epoch = epoch
-                    best_loss = epoch_loss
+                    best_loss = checkpoint_loss
                     torch.save( model.state_dict(), file_name )
                     epochs_wo_improv = 0
                 else:
