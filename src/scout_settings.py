@@ -1,7 +1,7 @@
 import torch
 
 
-hyperparameters = { 'embed_dimension' : 64,
+hyperparameters = { 'embed_dimension' : 96,
                     'nce_encode_dimension' : 16,
                     'n_resnet_blocks' : 3,
                     'kernel_size' : 7,
@@ -10,7 +10,7 @@ hyperparameters = { 'embed_dimension' : 64,
 
 training_parameters = { 'n_epochs' : 200,
                         'learning_rate' : 1e-3,
-                        'dropout_rate' : 0.18,
+                        'dropout_rate' : 0.10,
                         'initial_batch_size' : 64,
                         'epochs_to_2x_batch' : 60,
                         'max_batch_size' : 16384,
