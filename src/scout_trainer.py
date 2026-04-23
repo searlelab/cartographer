@@ -15,13 +15,13 @@ from constants import seed as default_seed
 from scout_loader import ScoutDistilledDataset, discover_split_files, scan_distilled_dataset
 from scout_loss import ScoutMultiTaskLoss
 from scout_model import initialize_scout_model
-from scout_settings import metadata_filename, ms2_vector_len, progress_tick_rows, training_parameters
+from scout_settings import hyperparameters, max_peptide_len, metadata_filename, ms2_vector_len, n_ion_channels, progress_tick_rows, training_parameters
 from tensorize import aa_to_int, nterm_unimod_map, residue_unimod_map, residues
 from training_loop import resolve_device, train_model
 
 
 MINI_EVAL_SAMPLE_ROWS = 10000
-MINI_EVAL_INTERVAL_BATCHES = 2000
+MINI_EVAL_INTERVAL_BATCHES = 5000
 MINI_EVAL_SEED = default_seed
 
 
@@ -206,6 +206,11 @@ def evaluate_scout( model, test_files, scalar_stats, batch_size, num_workers, de
     return _evaluate_scout_loader( model, loader, scalar_stats, device=device )
 
 
+def evaluate_scout_dataset( model, dataset, scalar_stats, batch_size, num_workers, device='cpu' ):
+    loader = DataLoader( dataset, batch_size, shuffle=False, num_workers=num_workers )
+    return _evaluate_scout_loader( model, loader, scalar_stats, device=device )
+
+
 def build_fixed_mini_eval_loader( test_files, scalar_stats, batch_size, sample_rows=MINI_EVAL_SAMPLE_ROWS, seed=MINI_EVAL_SEED ):
     dataset = ScoutDistilledDataset( test_files,
                                      scalar_stats[ 'irt_mean' ],
@@ -292,14 +297,20 @@ class ScoutMiniEvalReporter( object ):
 
 
 class ScoutCheckpointMetric( object ):
-    def __init__( self, loader, scalar_stats, eval_device ):
-        self.loader = loader
+    def __init__( self, scalar_stats, eval_device, eval_batch_size, num_workers ):
         self.scalar_stats = scalar_stats
         self.eval_device = eval_device
+        self.eval_batch_size = int( eval_batch_size )
+        self.num_workers = int( num_workers )
         self.last_metrics = None
 
     def __call__( self, model, dataset, phase, device, epoch, epoch_loss ):
-        metrics = _evaluate_scout_loader( model, self.loader, self.scalar_stats, device=self.eval_device )
+        metrics = evaluate_scout_dataset( model,
+                                          dataset,
+                                          self.scalar_stats,
+                                          self.eval_batch_size,
+                                          self.num_workers,
+                                          device=self.eval_device )
         score = _compute_balanced_checkpoint_score( metrics )
         self.last_metrics = dict( metrics )
         self.last_metrics[ 'balanced_checkpoint_score' ] = float( score )
@@ -342,14 +353,14 @@ def write_metadata( metadata_path,
                  'coverage' : { 'train' : _stats_to_summary( train_scan ),
                                 'val' : _stats_to_summary( val_scan ),
                                 'test' : _stats_to_summary( test_scan ), },
-                 'hyperparameters' : { 'embed_dimension' : 64,
-                                       'nce_encode_dimension' : 16,
-                                       'n_resnet_blocks' : 3,
-                                       'kernel_size' : 7,
-                                       'activation_function' : 'relu',
-                                       'max_peptide_len' : 31,
-                                       'n_ion_channels' : 4,
-                                       'ms2_vector_len' : 116, },
+                 'hyperparameters' : { 'embed_dimension' : int( hyperparameters[ 'embed_dimension' ] ),
+                                       'nce_encode_dimension' : int( hyperparameters[ 'nce_encode_dimension' ] ),
+                                       'n_resnet_blocks' : int( hyperparameters[ 'n_resnet_blocks' ] ),
+                                       'kernel_size' : int( hyperparameters[ 'kernel_size' ] ),
+                                       'activation_function' : hyperparameters[ 'activation_function' ],
+                                       'max_peptide_len' : int( max_peptide_len ),
+                                       'n_ion_channels' : int( n_ion_channels ),
+                                       'ms2_vector_len' : int( ms2_vector_len ), },
                  'training_parameters' : _serialize_training_parameters(),
                  'best_val_loss' : float( best_loss ),
                  'best_val_checkpoint_score' : float( best_loss ),
@@ -407,6 +418,7 @@ def train_scout( dataset_root,
         parts = [ key + '=' + str(value) for key, value in _top_counts( val_scan[ 'skip_counts' ], n=12 ) ]
         print( 'Val top skip reasons: ' + ', '.join( parts ) )
 
+    # Test coverage is logged for passive dashboarding and the final holdout report only.
     print( 'Scanning test split...' )
     test_scan = scan_distilled_dataset( test_files )
     print( 'Test tokenized rows=' + str( test_scan[ 'rows_tokenized' ] ) +
@@ -423,6 +435,7 @@ def train_scout( dataset_root,
            '; CCS mean=' + format( scalar_stats[ 'ccs_mean' ], '.6f' ) +
            ', std=' + format( scalar_stats[ 'ccs_std' ], '.6f' ) )
 
+    # Test rows feed only the passive mini-eval dashboard; checkpoint selection stays on validation data.
     mini_eval_loader, mini_eval_info = build_fixed_mini_eval_loader( test_files,
                                                                      scalar_stats,
                                                                      eval_batch_size,
@@ -457,9 +470,10 @@ def train_scout( dataset_root,
                                                 scalar_stats,
                                                 resolve_device( device ),
                                                 interval_batches=MINI_EVAL_INTERVAL_BATCHES )
-    checkpoint_metric = ScoutCheckpointMetric( mini_eval_loader,
-                                              scalar_stats,
-                                              resolve_device( device ) )
+    checkpoint_metric = ScoutCheckpointMetric( scalar_stats,
+                                              resolve_device( device ),
+                                              eval_batch_size,
+                                              num_workers )
 
     best_checkpoint_score = train_model( model,
                                          datasets,
@@ -481,6 +495,7 @@ def train_scout( dataset_root,
                                          patience=patience,
                                          start_epoch=start_epoch )
 
+    # Final test evaluation runs once after the best checkpoint is frozen from validation metrics.
     best_model = initialize_scout_model( model_file=output_file_name, map_location='cpu' )
     metrics = evaluate_scout( best_model,
                               test_files,
