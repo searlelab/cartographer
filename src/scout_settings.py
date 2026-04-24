@@ -1,7 +1,7 @@
 import torch
 
 
-hyperparameters = { 'embed_dimension' : 96,
+hyperparameters = { 'embed_dimension' : 80,
                     'nce_encode_dimension' : 16,
                     'n_resnet_blocks' : 3,
                     'kernel_size' : 7,
