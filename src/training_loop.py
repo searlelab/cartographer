@@ -1,10 +1,16 @@
 
 import sys
+import contextlib
 import numpy as np
 import time, datetime
 
 import torch
 from torch.utils.data import TensorDataset, IterableDataset, DataLoader
+
+try:
+    import pyarrow.parquet as pq
+except ImportError:
+    pq = None
 
 
 def resolve_device( device_str ):
@@ -17,6 +23,26 @@ def resolve_device( device_str ):
         return 'cuda'
     else:
         return 'cpu'
+
+
+def estimate_dataset_rows( dataset ):
+    """Best-effort row estimate for progress reporting on parquet-backed datasets."""
+    cached_rows = getattr( dataset, '_cached_num_rows', None )
+    if cached_rows is not None:
+        return cached_rows
+
+    parquet_files = getattr( dataset, 'parquet_files', None )
+    if pq is None or parquet_files is None:
+        return None
+
+    try:
+        total_rows = 0
+        for filepath in parquet_files:
+            total_rows += pq.ParquetFile( filepath ).metadata.num_rows
+        dataset._cached_num_rows = int( total_rows )
+        return dataset._cached_num_rows
+    except Exception:
+        return None
 
 
 def train_model( model,
@@ -37,6 +63,7 @@ def train_model( model,
                  checkpoint_metric_callback=None,
                  report_epoch_loss=True,
                  checkpoint_phase='test',
+                 skip_batch_phases=None,
                  patience=None,
                  start_epoch=1, ):
 
@@ -47,6 +74,15 @@ def train_model( model,
     print( 'Train device: ' + train_device + ', eval device: ' + other_device )
 
     phases = list( datasets )
+    skip_batch_phases = set( skip_batch_phases or [] )
+    if len( skip_batch_phases ) > 0:
+        invalid_phases = [ p for p in skip_batch_phases if p not in phases ]
+        if len( invalid_phases ) > 0:
+            raise ValueError( 'Undefined skip_batch_phases: ' + ', '.join( invalid_phases ) )
+        if checkpoint_metric_callback is None:
+            raise ValueError( 'skip_batch_phases requires checkpoint_metric_callback' )
+        if any( p != checkpoint_phase for p in skip_batch_phases ):
+            raise ValueError( 'skip_batch_phases only supports checkpoint_phase=' + str(checkpoint_phase) )
 
     # Detect if datasets are IterableDataset (e.g. parquet streaming)
     is_iterable = isinstance( datasets[ phases[0] ], IterableDataset )
@@ -72,14 +108,20 @@ def train_model( model,
 
         float_batch_scaler = initial_batch_size * np.exp( np.log(2) * (epoch-1) / epochs_to_double_batch  ) / 8
         train_batch_size = int( round( float_batch_scaler ) ) * 8
+        eval_batch_size = min( max_batch_size, train_batch_size )
+        for p in phases:
+            if p != 'train':
+                batch_sizes[p] = eval_batch_size
         if train_batch_size != batch_sizes['train'] or is_iterable:
             batch_sizes['train'] = train_batch_size
             if is_iterable:
-                dataloaders = dict( [ ( p, DataLoader( datasets[p], batch_sizes[p],
-                                                       shuffle=False, num_workers=num_workers, ) )
+                dataloaders = dict( [ ( p, None ) if p in skip_batch_phases
+                                      else ( p, DataLoader( datasets[p], batch_sizes[p],
+                                                            shuffle=False, num_workers=num_workers, ) )
                                     for p in phases ] )
             else:
-                dataloaders = dict( [ ( p, DataLoader( datasets[p], batch_sizes[p], shuffle=True, ) )
+                dataloaders = dict( [ ( p, None ) if p in skip_batch_phases
+                                      else ( p, DataLoader( datasets[p], batch_sizes[p], shuffle=True, ) )
                                     for p in phases ] )
 
         for phase in phases:
@@ -91,64 +133,96 @@ def train_model( model,
                 print( 'Batch size = ' + str(batch_sizes['train']) )
             else:
                 model.eval()   # Set model to evaluate mode
+                estimated_rows = estimate_dataset_rows( datasets[ phase ] )
+                progress_label = phase.capitalize() + ' progress'
+                if estimated_rows is not None:
+                    print( phase.capitalize() + ' batch size = ' + str(batch_sizes[ phase ]) +
+                           ', estimated rows = ' + str(estimated_rows) )
+                else:
+                    print( phase.capitalize() + ' batch size = ' + str(batch_sizes[ phase ]) )
 
             running_loss = 0.0
             total_samples = 0
             tick_rows_accum = 0
             tick_count = 0
+            next_phase_progress_rows = progress_tick_rows if progress_tick_rows > 0 else None
+            skip_phase_batches = phase in skip_batch_phases
 
             data = dataloaders[phase]
+            grad_context = contextlib.nullcontext() if phase == 'train' else torch.inference_mode()
 
             # Iterate over data.
-            for i, batch in enumerate( data ):
-                batch_size = batch[0].size(0)
-                batch = [ b.to( devices[phase] ) for b in batch ]
-                inputs = batch[:-2]
-                outputs = batch[-2:] # y and weight/source
+            if skip_phase_batches:
+                print( phase.capitalize() + ' batches delegated to checkpoint callback' )
+            else:
+                with grad_context:
+                    for i, batch in enumerate( data ):
+                        batch_size = batch[0].size(0)
+                        batch = [ b.to( devices[phase] ) for b in batch ]
+                        inputs = batch[:-2]
+                        outputs = batch[-2:] # y and weight/source
 
-                pred = model( *inputs )
-                loss = loss_fx( pred, *outputs, )
+                        pred = model( *inputs )
+                        loss = loss_fx( pred, *outputs, )
 
-                if phase == 'train':
-                    # zero the parameter gradients
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                        if phase == 'train':
+                            # zero the parameter gradients
+                            optimizer.zero_grad()
+                            loss.backward()
+                            optimizer.step()
 
-                    # Progress ticks
-                    if progress_tick_rows > 0:
-                        tick_rows_accum += batch_size
-                        while tick_rows_accum >= progress_tick_rows:
-                            tick_rows_accum -= progress_tick_rows
-                            tick_count += 1
-                            sys.stdout.write( '.' )
-                            if tick_count % 10 == 0:
-                                sys.stdout.write( ' ' )
-                            sys.stdout.flush()
+                            # Progress ticks
+                            if progress_tick_rows > 0:
+                                tick_rows_accum += batch_size
+                                while tick_rows_accum >= progress_tick_rows:
+                                    tick_rows_accum -= progress_tick_rows
+                                    tick_count += 1
+                                    sys.stdout.write( '.' )
+                                    if tick_count % 10 == 0:
+                                        sys.stdout.write( ' ' )
+                                    sys.stdout.flush()
 
-                    if batch_callback is not None:
-                        batch_callback( model=model,
-                                        epoch=epoch,
-                                        phase=phase,
-                                        batch_index=i + 1,
-                                        batch_size=batch_size,
-                                        batch_loss=float( loss.item() ),
-                                        device=devices[ phase ] )
+                            if batch_callback is not None:
+                                batch_callback( model=model,
+                                                epoch=epoch,
+                                                phase=phase,
+                                                batch_index=i + 1,
+                                                batch_size=batch_size,
+                                                batch_loss=float( loss.item() ),
+                                                device=devices[ phase ] )
 
-                # statistics
-                if report_epoch_loss:
-                    running_loss += loss.item() * batch_size
-                    total_samples += batch_size
+                        # statistics
+                        if report_epoch_loss:
+                            running_loss += loss.item() * batch_size
+                        total_samples += batch_size
+
+                        if phase != 'train' and next_phase_progress_rows is not None:
+                            while total_samples >= next_phase_progress_rows:
+                                if estimated_rows is not None and estimated_rows > 0:
+                                    percent = min( 100.0, 100.0 * total_samples / estimated_rows )
+                                    print( progress_label + ': ' +
+                                           format( percent, '6.2f' ) + '% (' +
+                                           str(total_samples) + '/' + str(estimated_rows) + ' rows)' )
+                                else:
+                                    print( progress_label + ': ' + str(total_samples) + ' rows processed' )
+                                next_phase_progress_rows += progress_tick_rows
 
             # End of phase newline after ticks
             if phase == 'train' and progress_tick_rows > 0 and tick_count > 0:
                 print()
+            elif phase != 'train' and progress_tick_rows > 0 and total_samples > 0:
+                if estimated_rows is not None:
+                    percent = min( 100.0, 100.0 * total_samples / estimated_rows ) if estimated_rows > 0 else 100.0
+                    print( progress_label + ': ' + format( percent, '6.2f' ) + '% (' + str(total_samples) +
+                           '/' + str(estimated_rows) + ' rows)' )
+                else:
+                    print( progress_label + ': ' + str(total_samples) + ' rows processed' )
 
             epoch_loss = None
-            if report_epoch_loss:
+            if report_epoch_loss and total_samples > 0:
                 epoch_loss = running_loss / total_samples
             runtime = time.time() - s_time
-            if report_epoch_loss:
+            if report_epoch_loss and epoch_loss is not None:
                 print( phase.capitalize() + format( epoch_loss, '.4f' ).rjust(8) )
 
             checkpoint_loss = epoch_loss

@@ -1,0 +1,239 @@
+import contextlib
+import io
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+import uuid
+from unittest import mock
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import torch
+
+
+sys.path.insert( 0, os.path.abspath( os.path.join( os.path.dirname( __file__ ), '..', 'src' ) ) )
+
+import scout_trainer
+import training_loop
+from scout_settings import ms2_vector_len
+
+
+class _SimpleTrainingLoss( torch.nn.Module ):
+    def forward( self, pred, true, weight ):
+        return torch.mean( ( pred - true ) ** 2 * weight )
+
+
+class _SimpleEvalModel( torch.nn.Module ):
+    def __init__( self ):
+        super().__init__()
+        self.anchor = torch.nn.Parameter( torch.tensor( 0.0 ) )
+
+    def forward( self, seq, charge, nce ):
+        batch_size = int( seq.shape[0] )
+        ms2 = torch.ones( ( batch_size, ms2_vector_len ), device=seq.device )
+        irt = torch.zeros( ( batch_size, 1 ), device=seq.device )
+        ccs = torch.zeros( ( batch_size, 1 ), device=seq.device )
+        return { 'ms2' : ms2, 'irt' : irt, 'ccs' : ccs }
+
+
+class _FakeLoader( object ):
+    def __init__( self, batch_size ):
+        self.batch_size = int( batch_size )
+
+
+class TrainingLoopSkipPhaseTest( unittest.TestCase ):
+    def test_skip_batch_phases_bypasses_callback_owned_val_loader( self ):
+        model = torch.nn.Linear( 1, 1, bias=False )
+        optimizer = torch.optim.SGD( model.parameters(), lr=0.1 )
+        loss_fx = _SimpleTrainingLoss()
+
+        train_dataset = object()
+        val_dataset = object()
+        callback_calls = []
+
+        train_batch = (
+            torch.tensor( [ [ 1.0 ], [ 2.0 ] ] ),
+            torch.tensor( [ [ 1.0 ], [ 2.0 ] ] ),
+            torch.ones( 2, 1 ),
+        )
+
+        def fake_dataloader( dataset, batch_size, shuffle=False, num_workers=0 ):
+            if dataset is train_dataset:
+                return [ train_batch ]
+            if dataset is val_dataset:
+                raise AssertionError( 'val DataLoader should not be built when phase is callback-owned' )
+            raise AssertionError( 'Unexpected dataset' )
+
+        def fake_checkpoint_metric( **kwargs ):
+            callback_calls.append( kwargs )
+            return 0.25, 'score'
+
+        with mock.patch.object( training_loop, 'DataLoader', side_effect=fake_dataloader ), \
+             mock.patch.object( torch, 'save', return_value=None ):
+            best_loss = training_loop.train_model( model,
+                                                   { 'train' : train_dataset, 'val' : val_dataset },
+                                                   initial_batch_size=8,
+                                                   max_batch_size=8,
+                                                   epochs_to_double_batch=1,
+                                                   loss_fx=loss_fx,
+                                                   optimizer=optimizer,
+                                                   num_epochs=1,
+                                                   train_device='cpu',
+                                                   other_device='cpu',
+                                                   file_name='dummy.pt',
+                                                   checkpoint_metric_callback=fake_checkpoint_metric,
+                                                   checkpoint_phase='val',
+                                                   skip_batch_phases={ 'val' },
+                                                   report_epoch_loss=False )
+
+        self.assertEqual( len( callback_calls ), 1 )
+        self.assertEqual( callback_calls[0][ 'phase' ], 'val' )
+        self.assertAlmostEqual( best_loss, 0.25, places=6 )
+
+
+class ScoutEvaluationHelpersTest( unittest.TestCase ):
+    def test_eval_backoff_halves_batch_size_after_cuda_oom( self ):
+        metrics = { 'test_ms2_cosine' : 0.8,
+                    'test_ms2_count' : 5,
+                    'test_irt_mae' : 0.2,
+                    'test_irt_rmse' : 0.3,
+                    'test_irt_count' : 5,
+                    'test_ccs_mae' : 1.1,
+                    'test_ccs_rmse' : 1.3,
+                    'test_ccs_count' : 5, }
+        batch_sizes_seen = []
+
+        def fake_loader( dataset, batch_size, shuffle=False, num_workers=0 ):
+            return _FakeLoader( batch_size )
+
+        def fake_eval_loader( model,
+                              loader,
+                              scalar_stats,
+                              device='cpu',
+                              label=None,
+                              expected_rows=None,
+                              progress_tick_rows=0,
+                              effective_batch_size=None,
+                              start_time=None ):
+            batch_sizes_seen.append( int( effective_batch_size ) )
+            if int( effective_batch_size ) == 8:
+                raise RuntimeError( 'CUDA out of memory while evaluating Scout' )
+            return dict( metrics )
+
+        with mock.patch.object( scout_trainer, 'DataLoader', side_effect=fake_loader ), \
+             mock.patch.object( scout_trainer, '_evaluate_scout_loader', side_effect=fake_eval_loader ), \
+             mock.patch.object( torch.cuda, 'empty_cache', return_value=None ) as empty_cache_mock:
+            result_metrics, effective_batch_size = scout_trainer.evaluate_scout_dataset( object(),
+                                                                                         object(),
+                                                                                         { 'irt_mean' : 0.0,
+                                                                                           'irt_std' : 1.0,
+                                                                                           'ccs_mean' : 0.0,
+                                                                                           'ccs_std' : 1.0, },
+                                                                                         batch_size=8,
+                                                                                         num_workers=0,
+                                                                                         device='cuda',
+                                                                                         label='Val checkpoint',
+                                                                                         return_effective_batch_size=True )
+
+        self.assertEqual( batch_sizes_seen, [ 8, 4 ] )
+        self.assertEqual( effective_batch_size, 4 )
+        self.assertEqual( result_metrics[ 'effective_eval_batch_size' ], 4 )
+        self.assertEqual( result_metrics[ 'test_ms2_count' ], 5 )
+        empty_cache_mock.assert_called_once()
+
+    def test_eval_progress_reporting_prints_start_progress_and_complete( self ):
+        model = _SimpleEvalModel()
+        scalar_stats = { 'irt_mean' : 0.0,
+                         'irt_std' : 1.0,
+                         'ccs_mean' : 0.0,
+                         'ccs_std' : 1.0, }
+
+        def make_batch():
+            seq = torch.zeros( ( 2, 5 ), dtype=torch.int64 )
+            charge = torch.zeros( ( 2, 6 ), dtype=torch.float32 )
+            nce = torch.zeros( ( 2, 1 ), dtype=torch.float32 )
+            target = torch.zeros( ( 2, ms2_vector_len + 2 ), dtype=torch.float32 )
+            target[ :, :ms2_vector_len ] = 1.0
+            mask = torch.ones( ( 2, 3 ), dtype=torch.float32 )
+            return seq, charge, nce, target, mask
+
+        loader = [ make_batch(), make_batch() ]
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout( output ):
+            metrics = scout_trainer._evaluate_scout_loader( model,
+                                                            loader,
+                                                            scalar_stats,
+                                                            device='cpu',
+                                                            label='Val checkpoint',
+                                                            expected_rows=4,
+                                                            progress_tick_rows=2,
+                                                            effective_batch_size=2,
+                                                            start_time=0.0 )
+
+        text = output.getvalue()
+        self.assertIn( 'Val checkpoint start:', text )
+        self.assertIn( 'Val checkpoint progress:', text )
+        self.assertIn( 'Val checkpoint complete:', text )
+        self.assertEqual( metrics[ 'test_ms2_count' ], 4 )
+
+
+class ScoutTrainerSmokeTest( unittest.TestCase ):
+    def setUp( self ):
+        self.temp_dir = os.path.join( os.getcwd(), 'tests_artifacts_scout_smoke_' + uuid.uuid4().hex )
+        self.data_dir = os.path.join( self.temp_dir, 'data' )
+        os.makedirs( self.data_dir, exist_ok=True )
+        self._write_split( 'train-00000-of-00001.parquet',
+                           [ self._row( 10.0, 110.0 ), self._row( 11.0, 111.0 ), self._row( 12.0, 112.0 ) ] )
+        self._write_split( 'val-00000-of-00001.parquet',
+                           [ self._row( 13.0, 113.0 ), self._row( 14.0, 114.0 ) ] )
+        self._write_split( 'test-00000-of-00001.parquet',
+                           [ self._row( 15.0, 115.0 ), self._row( 16.0, 116.0 ) ] )
+
+    def tearDown( self ):
+        if os.path.isdir( self.temp_dir ):
+            try:
+                shutil.rmtree( self.temp_dir )
+            except PermissionError:
+                pass
+
+    def _row( self, irt, ccs ):
+        return {
+            'modified_sequence' : '[]-PEPTIDE-[]',
+            'precursor_charge_onehot' : [ 0.0, 1.0, 0.0, 0.0, 0.0, 0.0 ],
+            'collision_energy_aligned_normed' : 0.33,
+            'indexed_retention_time' : float( irt ),
+            'ccs' : float( ccs ),
+            'intensities_raw' : [ 0.5 ] * ms2_vector_len,
+        }
+
+    def _write_split( self, filename, rows ):
+        table = pa.table( { key : [ row[ key ] for row in rows ] for key in rows[0].keys() } )
+        pq.write_table( table, os.path.join( self.data_dir, filename ) )
+
+    def test_train_scout_one_epoch_reports_progress_and_writes_outputs( self ):
+        output_file = os.path.join( self.temp_dir, 'Scout_smoke.pt' )
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout( output ):
+            result = scout_trainer.train_scout( self.temp_dir,
+                                                output_file,
+                                                device='cpu',
+                                                num_workers=0,
+                                                n_epochs=1,
+                                                eval_batch_size=4 )
+
+        text = output.getvalue()
+        self.assertIn( 'Val checkpoint start:', text )
+        self.assertIn( 'Final test start:', text )
+        self.assertIn( 'Final test complete:', text )
+        self.assertTrue( os.path.isfile( output_file ) )
+        self.assertTrue( os.path.isfile( result[ 'metadata_path' ] ) )
+        self.assertIn( 'metrics', result )
+        self.assertIn( 'test_ms2_cosine', result[ 'metrics' ] )
+
+
+if __name__ == '__main__':
+    unittest.main()
