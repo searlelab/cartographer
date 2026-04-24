@@ -14,38 +14,40 @@ def _init_linear( layer ):
     return layer
 
 
-class precursor_charge_embed( nn.Module ):
-    def __init__( self, vec_length, n_charges, embed_dim ):
+class scout_attention_pool( nn.Module ):
+    def __init__( self, embed_dim ):
         super().__init__()
-        self.embed_dim1 = nn.Linear( n_charges, vec_length )
-        self.embed_dim2 = nn.Linear( 1, embed_dim )
+        self.score = _init_linear( nn.Linear( embed_dim, 1 ) )
 
-    def forward( self, x ):
-        x = self.embed_dim1( x )
-        x = x.unsqueeze( -1 )
-        return self.embed_dim2( x )
+    def forward( self, seq_features, seq ):
+        mask = seq.ne( 0 )
+        logits = self.score( seq_features.transpose( 1, 2 ) ).squeeze( -1 )
+        logits = logits.masked_fill( ~mask, float( '-inf' ) )
+        valid_rows = mask.any( dim=1, keepdim=True )
+        logits = torch.where( valid_rows, logits, torch.zeros_like( logits ) )
+        weights = torch.softmax( logits, dim=1 )
+        weights = weights * mask.to( weights.dtype )
+        weights = weights / weights.sum( dim=1, keepdim=True ).clamp( min=1e-7 )
+        return torch.sum( seq_features * weights.unsqueeze( 1 ), dim=-1 )
 
 
-class nce_embed( nn.Module ):
-    def __init__( self, vec_length, embed_dim, nce_dim ):
+class scout_film_conditioner( nn.Module ):
+    def __init__( self, n_charges, embed_dim, act_fx ):
         super().__init__()
-        self.embed_dim1 = nn.Sequential( nn.Linear( 1, nce_dim ),
-                                         nn.ReLU(),
-                                         nn.Linear( nce_dim, vec_length ) )
-        self.embed_dim2 = nn.Linear( 1, embed_dim )
+        self.layers = nn.Sequential( _init_linear( nn.Linear( n_charges * 2 + 1, embed_dim ) ),
+                                     nn.ReLU() if act_fx == 'relu' else nn.Identity(),
+                                     _init_linear( nn.Linear( embed_dim, embed_dim * 2 ) ) )
 
-    def forward( self, x ):
-        x = self.embed_dim1( x )
-        x = x.unsqueeze( -1 )
-        return self.embed_dim2( x )
+    def forward( self, charge, nce ):
+        cond = torch.cat( [ charge, nce, charge * nce ], dim=1 )
+        gamma, beta = self.layers( cond ).chunk( 2, dim=1 )
+        return gamma.unsqueeze( -1 ), beta.unsqueeze( -1 )
 
 
 class scout_shared_encoder( nn.Module ):
-    def __init__( self, vec_length, n_states, n_charges, embed_dim, nce_dim, n_blocks, kernel, drop_rate, act_fx ):
+    def __init__( self, n_states, embed_dim, n_blocks, kernel, drop_rate, act_fx ):
         super().__init__()
         self.seq_embed = nn.Embedding( n_states, embed_dim, padding_idx=0 )
-        self.charge_embed = precursor_charge_embed( vec_length, n_charges, embed_dim )
-        self.nce_embed = nce_embed( vec_length, embed_dim, nce_dim )
         self.resnet_blocks = nn.Sequential( *[ resnet_block( embed_dim,
                                                              embed_dim,
                                                              kernel,
@@ -53,28 +55,32 @@ class scout_shared_encoder( nn.Module ):
                                                              act_fx )
                                                for d in range( n_blocks ) ] )
         self.dropout = nn.Dropout( drop_rate )
-        self.flatten = nn.Flatten()
+        self.attention_pool = scout_attention_pool( embed_dim )
 
-    def forward( self, seq, charge, nce ):
+    def forward( self, seq ):
         x = self.seq_embed( seq )
-        x = x * self.charge_embed( charge ) * self.nce_embed( nce )
         x = x.transpose( 1, -1 )
         x = self.resnet_blocks( x )
         x = self.dropout( x )
-        pooled = self.flatten( x )
+        pooled = self.attention_pool( x, seq )
         return x, pooled
 
 
 class scout_ms2_head( nn.Module ):
-    def __init__( self, embed_dim, n_channels ):
+    def __init__( self, embed_dim, n_channels, n_charges, kernel, act_fx ):
         super().__init__()
+        self.conditioner = scout_film_conditioner( n_charges, embed_dim, act_fx )
+        self.resnet_block = resnet_block( embed_dim, embed_dim, kernel, 1, act_fx )
         self.output = nn.Conv1d( embed_dim, n_channels, kernel_size=4 )
 
     def normalize( self, x ):
         return x.clamp( min=0.0 ) / x.amax( dim=(1, -1), keepdim=True ).clamp( min=1e-7 )
 
-    def forward( self, seq_features ):
-        x = self.output( seq_features )
+    def forward( self, seq_features, charge, nce ):
+        gamma, beta = self.conditioner( charge, nce )
+        x = seq_features * ( 1.0 + gamma ) + beta
+        x = self.resnet_block( x )
+        x = self.output( x )
         x = self.normalize( x )
         return x.flatten( 1 )[ :, :ms2_vector_len ]
 
@@ -104,22 +110,18 @@ class scout_ccs_head( nn.Module ):
 class scout_model( nn.Module ):
     def __init__( self, vec_length, n_states, n_charges, embed_dim, nce_dim, n_blocks, kernel, drop_rate, act_fx ):
         super().__init__()
-        self.encoder = scout_shared_encoder( vec_length,
-                                             n_states,
-                                             n_charges,
+        self.encoder = scout_shared_encoder( n_states,
                                              embed_dim,
-                                             nce_dim,
                                              n_blocks,
                                              kernel,
                                              drop_rate,
                                              act_fx )
-        pooled_dim = vec_length * embed_dim
-        self.ms2_head = scout_ms2_head( embed_dim, n_ion_channels )
-        self.irt_head = scout_irt_head( pooled_dim, embed_dim, act_fx )
-        self.ccs_head = scout_ccs_head( pooled_dim, embed_dim, n_charges, act_fx )
+        self.ms2_head = scout_ms2_head( embed_dim, n_ion_channels, n_charges, kernel, act_fx )
+        self.irt_head = scout_irt_head( embed_dim, embed_dim, act_fx )
+        self.ccs_head = scout_ccs_head( embed_dim, embed_dim, n_charges, act_fx )
 
     def forward_shared( self, seq, charge, nce ):
-        seq_features, pooled_features = self.encoder( seq, charge, nce )
+        seq_features, pooled_features = self.encoder( seq )
         return { 'seq_features' : seq_features,
                  'pooled_features' : pooled_features }
 
@@ -127,7 +129,7 @@ class scout_model( nn.Module ):
         shared = self.forward_shared( seq, charge, nce )
         seq_features = shared[ 'seq_features' ]
         pooled_features = shared[ 'pooled_features' ]
-        return { 'ms2' : self.ms2_head( seq_features ),
+        return { 'ms2' : self.ms2_head( seq_features, charge, nce ),
                  'irt' : self.irt_head( pooled_features ),
                  'ccs' : self.ccs_head( pooled_features, charge ), }
 
