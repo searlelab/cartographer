@@ -65,7 +65,8 @@ def train_model( model,
                  checkpoint_phase='test',
                  skip_batch_phases=None,
                  patience=None,
-                 start_epoch=1, ):
+                 start_epoch=1,
+                 max_train_batches_per_epoch=None, ):
 
     s_time = time.time()
 
@@ -157,6 +158,10 @@ def train_model( model,
             else:
                 with grad_context:
                     for i, batch in enumerate( data ):
+                        if phase == 'train' and max_train_batches_per_epoch is not None and i >= max_train_batches_per_epoch:
+                            print( 'Reached max_train_batches_per_epoch=' + str(int(max_train_batches_per_epoch)) +
+                                   '; ending training phase early for this epoch' )
+                            break
                         batch_size = batch[0].size(0)
                         batch = [ b.to( devices[phase] ) for b in batch ]
                         inputs = batch[:-2]
