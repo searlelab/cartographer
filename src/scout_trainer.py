@@ -20,9 +20,14 @@ from tensorize import aa_to_int, nterm_unimod_map, residue_unimod_map, residues
 from training_loop import resolve_device, train_model
 
 
-MINI_EVAL_SAMPLE_ROWS = 10000
-MINI_EVAL_INTERVAL_BATCHES = 5000
+MINI_EVAL_SAMPLE_ROWS = 8192
+MINI_EVAL_INTERVAL_BATCHES = 10000
 MINI_EVAL_SEED = default_seed
+MINI_EVAL_BATCH_SIZE_CAP = 1024
+EVAL_MIN_BATCH_SIZE = 1
+VAL_CHECKPOINT_SAMPLE_ROWS = 262144
+VAL_CHECKPOINT_SEED = default_seed + 101
+FULL_VAL_AUDIT_INTERVAL_EPOCHS = 10
 
 
 def parse_args( args ):
@@ -114,11 +119,51 @@ def _scalar_stats_from_train( train_stats ):
              'ccs_std' : float( ccs_std ), }
 
 
-def _evaluate_scout_loader( model, loader, scalar_stats, device='cpu' ):
+def _format_elapsed( start_time ):
+    elapsed_seconds = max( 0, int( time.time() - start_time ) )
+    return str( timedelta( seconds=elapsed_seconds ) )
+
+
+def _format_rows_per_second( rows_processed, start_time ):
+    elapsed_seconds = max( time.time() - start_time, 1e-9 )
+    return format( float(rows_processed) / elapsed_seconds, '.1f' )
+
+
+def _is_cuda_oom_error( error, device ):
+    device_str = str( device )
+    if not device_str.startswith( 'cuda' ):
+        return False
+    if isinstance( error, torch.cuda.OutOfMemoryError ):
+        return True
+    return 'out of memory' in str(error).lower()
+
+
+def _evaluate_scout_loader( model,
+                            loader,
+                            scalar_stats,
+                            device='cpu',
+                            label=None,
+                            expected_rows=None,
+                            progress_tick_rows=0,
+                            effective_batch_size=None,
+                            start_time=None ):
     original_training = model.training
     original_device = next( model.parameters() ).device
     model.to( device )
     model.eval()
+    if start_time is None:
+        start_time = time.time()
+
+    total_rows = 0
+    next_progress_rows = int( progress_tick_rows ) if progress_tick_rows and progress_tick_rows > 0 else None
+    if label is not None:
+        rows_text = 'unknown'
+        if expected_rows is not None:
+            rows_text = str( int(expected_rows) )
+        batch_text = 'unknown' if effective_batch_size is None else str( int(effective_batch_size) )
+        print( label + ' start: device=' + str(device) +
+               ', batch_size=' + batch_text +
+               ', expected_rows=' + rows_text )
 
     totals = { 'ms2_cosine_sum' : 0.0,
                'ms2_count' : 0,
@@ -129,7 +174,7 @@ def _evaluate_scout_loader( model, loader, scalar_stats, device='cpu' ):
                'ccs_sq_sum' : 0.0,
                'ccs_count' : 0, }
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for seq, charge, nce, target_bundle, mask_bundle in loader:
             seq = seq.to( device )
             charge = charge.to( device )
@@ -137,6 +182,22 @@ def _evaluate_scout_loader( model, loader, scalar_stats, device='cpu' ):
             target_bundle = target_bundle.to( device )
             mask_bundle = mask_bundle.to( device )
             pred = model( seq, charge, nce )
+            total_rows += int( seq.shape[0] )
+
+            if label is not None and next_progress_rows is not None:
+                while total_rows >= next_progress_rows:
+                    if expected_rows is not None and expected_rows > 0:
+                        percent = min( 100.0, 100.0 * float(total_rows) / float(expected_rows) )
+                        print( label + ' progress: ' +
+                               format( percent, '6.2f' ) + '% (' +
+                               str(total_rows) + '/' + str(int(expected_rows)) +
+                               ' rows, ' + _format_rows_per_second( total_rows, start_time ) +
+                               ' rows/s, elapsed ' + _format_elapsed( start_time ) + ')' )
+                    else:
+                        print( label + ' progress: ' + str(total_rows) +
+                               ' rows, ' + _format_rows_per_second( total_rows, start_time ) +
+                               ' rows/s, elapsed ' + _format_elapsed( start_time ) )
+                    next_progress_rows += int( progress_tick_rows )
 
             mask_ms2 = mask_bundle[ :, 0 ] > 0.5
             if torch.any( mask_ms2 ):
@@ -182,6 +243,10 @@ def _evaluate_scout_loader( model, loader, scalar_stats, device='cpu' ):
     if totals[ 'ccs_count' ] > 0:
         metrics[ 'test_ccs_mae' ] = totals[ 'ccs_abs_sum' ] / totals[ 'ccs_count' ]
         metrics[ 'test_ccs_rmse' ] = ( totals[ 'ccs_sq_sum' ] / totals[ 'ccs_count' ] ) ** 0.5
+    if label is not None:
+        print( label + ' complete: processed ' + str(total_rows) +
+               ' rows in ' + _format_elapsed( start_time ) +
+               ' (' + _format_rows_per_second( total_rows, start_time ) + ' rows/s)' )
     model.to( original_device )
     if original_training:
         model.train()
@@ -195,29 +260,108 @@ def _compute_balanced_checkpoint_score( metrics ):
     return ( ( ms2_component ** 2 + rt_component ** 2 + ccs_component ** 2 ) / 3.0 ) ** 0.5
 
 
-def evaluate_scout( model, test_files, scalar_stats, batch_size, num_workers, device='cpu' ):
+def _evaluate_scout_dataset_with_backoff( model,
+                                          dataset,
+                                          scalar_stats,
+                                          batch_size,
+                                          num_workers,
+                                          device='cpu',
+                                          label=None,
+                                          expected_rows=None,
+                                          progress_tick_rows=0 ):
+    device = resolve_device( device )
+    requested_batch_size = max( int(batch_size), 1 )
+    current_batch_size = requested_batch_size
+    attempted_batch_sizes = []
+
+    while True:
+        attempted_batch_sizes.append( int(current_batch_size) )
+        loader = DataLoader( dataset, current_batch_size, shuffle=False, num_workers=num_workers )
+        try:
+            metrics = _evaluate_scout_loader( model,
+                                             loader,
+                                             scalar_stats,
+                                             device=device,
+                                             label=label,
+                                             expected_rows=expected_rows,
+                                             progress_tick_rows=progress_tick_rows,
+                                             effective_batch_size=current_batch_size,
+                                             start_time=time.time() )
+            metrics[ 'effective_eval_batch_size' ] = int( current_batch_size )
+            return metrics, int( current_batch_size )
+        except RuntimeError as error:
+            if not _is_cuda_oom_error( error, device ):
+                raise
+            if current_batch_size <= EVAL_MIN_BATCH_SIZE:
+                attempts = ', '.join( str(v) for v in attempted_batch_sizes )
+                raise RuntimeError( ( label or 'Scout evaluation' ) +
+                                    ' failed after CUDA OOM retries with batch sizes: ' + attempts ) from error
+
+            next_batch_size = max( EVAL_MIN_BATCH_SIZE, current_batch_size // 2 )
+            if next_batch_size == current_batch_size:
+                next_batch_size = max( EVAL_MIN_BATCH_SIZE, current_batch_size - 1 )
+            print( ( label or 'Scout evaluation' ) +
+                   ' CUDA OOM at batch_size=' + str(current_batch_size) +
+                   '; retrying with batch_size=' + str(next_batch_size) )
+            torch.cuda.empty_cache()
+            current_batch_size = next_batch_size
+
+
+def evaluate_scout( model,
+                    test_files,
+                    scalar_stats,
+                    batch_size,
+                    num_workers,
+                    device='cpu',
+                    label=None,
+                    expected_rows=None,
+                    progress_tick_rows=0,
+                    return_effective_batch_size=False ):
     dataset = ScoutDistilledDataset( test_files,
                                      scalar_stats[ 'irt_mean' ],
                                      scalar_stats[ 'irt_std' ],
                                      scalar_stats[ 'ccs_mean' ],
                                      scalar_stats[ 'ccs_std' ],
                                      shuffle_files=False )
-    loader = DataLoader( dataset, batch_size, shuffle=False, num_workers=num_workers )
-    return _evaluate_scout_loader( model, loader, scalar_stats, device=device )
+    metrics, effective_batch_size = _evaluate_scout_dataset_with_backoff( model,
+                                                                          dataset,
+                                                                          scalar_stats,
+                                                                          batch_size,
+                                                                          num_workers,
+                                                                          device=device,
+                                                                          label=label,
+                                                                          expected_rows=expected_rows,
+                                                                          progress_tick_rows=progress_tick_rows )
+    if return_effective_batch_size:
+        return metrics, effective_batch_size
+    return metrics
 
 
-def evaluate_scout_dataset( model, dataset, scalar_stats, batch_size, num_workers, device='cpu' ):
-    loader = DataLoader( dataset, batch_size, shuffle=False, num_workers=num_workers )
-    return _evaluate_scout_loader( model, loader, scalar_stats, device=device )
+def evaluate_scout_dataset( model,
+                            dataset,
+                            scalar_stats,
+                            batch_size,
+                            num_workers,
+                            device='cpu',
+                            label=None,
+                            expected_rows=None,
+                            progress_tick_rows=0,
+                            return_effective_batch_size=False ):
+    metrics, effective_batch_size = _evaluate_scout_dataset_with_backoff( model,
+                                                                          dataset,
+                                                                          scalar_stats,
+                                                                          batch_size,
+                                                                          num_workers,
+                                                                          device=device,
+                                                                          label=label,
+                                                                          expected_rows=expected_rows,
+                                                                          progress_tick_rows=progress_tick_rows )
+    if return_effective_batch_size:
+        return metrics, effective_batch_size
+    return metrics
 
 
-def build_fixed_mini_eval_loader( test_files, scalar_stats, batch_size, sample_rows=MINI_EVAL_SAMPLE_ROWS, seed=MINI_EVAL_SEED ):
-    dataset = ScoutDistilledDataset( test_files,
-                                     scalar_stats[ 'irt_mean' ],
-                                     scalar_stats[ 'irt_std' ],
-                                     scalar_stats[ 'ccs_mean' ],
-                                     scalar_stats[ 'ccs_std' ],
-                                     shuffle_files=False )
+def _build_fixed_sample_loader( dataset, batch_size, sample_rows, seed, empty_error_message ):
     rng = random.Random( int(seed) )
     reservoir = []
     total_seen = 0
@@ -233,7 +377,7 @@ def build_fixed_mini_eval_loader( test_files, scalar_stats, batch_size, sample_r
             reservoir[ replace_idx ] = row
 
     if len( reservoir ) == 0:
-        raise RuntimeError( 'Mini-eval sample is empty; no usable rows found.' )
+        raise RuntimeError( empty_error_message )
 
     seq_tensor = torch.stack( [ row[0] for row in reservoir ] )
     charge_tensor = torch.stack( [ row[1] for row in reservoir ] )
@@ -246,11 +390,40 @@ def build_fixed_mini_eval_loader( test_files, scalar_stats, batch_size, sample_r
     sample_info = { 'sample_rows_requested' : int( sample_rows ),
                     'sample_rows_actual' : int( len( reservoir ) ),
                     'rows_seen' : int( total_seen ),
+                    'batch_size' : int( batch_size ),
                     'seed' : int( seed ),
                     'ms2_rows' : int( mask_tensor[:, 0].sum().item() ),
                     'irt_rows' : int( mask_tensor[:, 1].sum().item() ),
                     'ccs_rows' : int( mask_tensor[:, 2].sum().item() ), }
     return loader, sample_info
+
+
+def build_fixed_mini_eval_loader( test_files, scalar_stats, batch_size, sample_rows=MINI_EVAL_SAMPLE_ROWS, seed=MINI_EVAL_SEED ):
+    dataset = ScoutDistilledDataset( test_files,
+                                     scalar_stats[ 'irt_mean' ],
+                                     scalar_stats[ 'irt_std' ],
+                                     scalar_stats[ 'ccs_mean' ],
+                                     scalar_stats[ 'ccs_std' ],
+                                     shuffle_files=False )
+    return _build_fixed_sample_loader( dataset,
+                                       batch_size,
+                                       sample_rows,
+                                       seed,
+                                       'Mini-eval sample is empty; no usable rows found.' )
+
+
+def build_fixed_val_checkpoint_loader( val_files, scalar_stats, batch_size, sample_rows=VAL_CHECKPOINT_SAMPLE_ROWS, seed=VAL_CHECKPOINT_SEED ):
+    dataset = ScoutDistilledDataset( val_files,
+                                     scalar_stats[ 'irt_mean' ],
+                                     scalar_stats[ 'irt_std' ],
+                                     scalar_stats[ 'ccs_mean' ],
+                                     scalar_stats[ 'ccs_std' ],
+                                     shuffle_files=False )
+    return _build_fixed_sample_loader( dataset,
+                                       batch_size,
+                                       sample_rows,
+                                       seed,
+                                       'Val checkpoint sample is empty; no usable rows found.' )
 
 
 class ScoutMiniEvalReporter( object ):
@@ -266,8 +439,8 @@ class ScoutMiniEvalReporter( object ):
 
     def print_header( self ):
         print( 'Mini Eval (fixed seeded test sample)' )
-        print( ' epoch  | train_batch | elapsed  | ckpt_rms | ms2_cos  | n_ms2 | irt_mae  | n_irt | ccs_mae  | n_ccs ' )
-        print( '--------|-------------|----------|----------|----------|-------|----------|-------|----------|-------' )
+        print( ' epoch | train_batch | elapsed  | ckpt_rms | ms2_cos  | n_ms2 | irt_mae  | n_irt | ccs_mae  | n_ccs ' )
+        print( '-------|-------------|----------|----------|----------|-------|----------|-------|----------|-------' )
 
     def __call__( self, model, epoch, phase, batch_index, batch_size, batch_loss, device ):
         if phase != 'train':
@@ -297,26 +470,71 @@ class ScoutMiniEvalReporter( object ):
 
 
 class ScoutCheckpointMetric( object ):
-    def __init__( self, scalar_stats, eval_device, eval_batch_size, num_workers ):
+    def __init__( self,
+                  loader,
+                  sample_info,
+                  scalar_stats,
+                  eval_device,
+                  eval_batch_size,
+                  num_workers,
+                  full_dataset=None,
+                  expected_rows=None,
+                  progress_tick_rows=0,
+                  full_eval_every_epochs=None ):
+        self.loader = loader
+        self.sample_info = dict( sample_info )
         self.scalar_stats = scalar_stats
         self.eval_device = eval_device
         self.eval_batch_size = int( eval_batch_size )
         self.num_workers = int( num_workers )
+        self.full_dataset = full_dataset
+        self.expected_rows = int( expected_rows ) if expected_rows is not None else None
+        self.progress_tick_rows = int( progress_tick_rows )
+        self.full_eval_every_epochs = None if full_eval_every_epochs is None else int( full_eval_every_epochs )
         self.last_metrics = None
+        self.last_effective_eval_batch_size = None
+        self.last_full_metrics = None
+        self.last_full_effective_eval_batch_size = None
 
     def __call__( self, model, dataset, phase, device, epoch, epoch_loss ):
-        metrics = evaluate_scout_dataset( model,
-                                          dataset,
+        metrics = _evaluate_scout_loader( model,
+                                          self.loader,
                                           self.scalar_stats,
-                                          self.eval_batch_size,
-                                          self.num_workers,
                                           device=self.eval_device )
+        effective_batch_size = self.sample_info[ 'batch_size' ]
         score = _compute_balanced_checkpoint_score( metrics )
         self.last_metrics = dict( metrics )
         self.last_metrics[ 'balanced_checkpoint_score' ] = float( score )
-        print( 'Val checkpoint metrics: MS2 cosine=' + format( metrics[ 'test_ms2_cosine' ], '.6f' ) +
-               ', iRT MAE=' + format( metrics[ 'test_irt_mae' ], '.6f' ) +
-               ', CCS MAE=' + format( metrics[ 'test_ccs_mae' ], '.6f' ) )
+        self.last_metrics[ 'sample_rows' ] = int( self.sample_info[ 'sample_rows_actual' ] )
+        self.last_metrics[ 'rows_seen' ] = int( self.sample_info[ 'rows_seen' ] )
+        self.last_metrics[ 'sample_seed' ] = int( self.sample_info[ 'seed' ] )
+        self.last_effective_eval_batch_size = int( effective_batch_size )
+        print( 'Val checkpoint sample metrics: MS2 cosine=' + format( metrics[ 'test_ms2_cosine' ], '.6f' ) +
+                ', iRT MAE=' + format( metrics[ 'test_irt_mae' ], '.6f' ) +
+                ', CCS MAE=' + format( metrics[ 'test_ccs_mae' ], '.6f' ) +
+                ', sample_rows=' + str( self.sample_info[ 'sample_rows_actual' ] ) +
+                ', eval_batch_size=' + str( effective_batch_size ) )
+
+        if self.full_dataset is not None and self.full_eval_every_epochs is not None and self.full_eval_every_epochs > 0:
+            if int(epoch) % self.full_eval_every_epochs == 0:
+                full_metrics, full_effective_batch_size = evaluate_scout_dataset( model,
+                                                                                  self.full_dataset,
+                                                                                  self.scalar_stats,
+                                                                                  self.eval_batch_size,
+                                                                                  self.num_workers,
+                                                                                  device=self.eval_device,
+                                                                                  label='Full val audit',
+                                                                                  expected_rows=self.expected_rows,
+                                                                                  progress_tick_rows=self.progress_tick_rows,
+                                                                                  return_effective_batch_size=True )
+                full_score = _compute_balanced_checkpoint_score( full_metrics )
+                self.last_full_metrics = dict( full_metrics )
+                self.last_full_metrics[ 'balanced_checkpoint_score' ] = float( full_score )
+                self.last_full_effective_eval_batch_size = int( full_effective_batch_size )
+                print( 'Full val audit metrics: MS2 cosine=' + format( full_metrics[ 'test_ms2_cosine' ], '.6f' ) +
+                       ', iRT MAE=' + format( full_metrics[ 'test_irt_mae' ], '.6f' ) +
+                       ', CCS MAE=' + format( full_metrics[ 'test_ccs_mae' ], '.6f' ) +
+                       ', eval_batch_size=' + str( full_effective_batch_size ) )
         return float( score ), 'balanced_rms'
 
 
@@ -332,7 +550,10 @@ def write_metadata( metadata_path,
                     test_scan,
                     metrics,
                     best_loss,
-                    checkpoint_metrics=None ):
+                    checkpoint_metrics=None,
+                    full_val_metrics=None,
+                    checkpoint_sample_info=None,
+                    full_val_audit_interval_epochs=None ):
     residue_map_json = [ { 'residue' : aa, 'unimod' : unimod, 'token' : token }
                          for ( aa, unimod ), token in sorted( residue_unimod_map.items() ) ]
     metadata = { 'schema_version' : 1,
@@ -367,9 +588,13 @@ def write_metadata( metadata_path,
                                        'n_ion_channels' : int( n_ion_channels ),
                                        'ms2_vector_len' : int( ms2_vector_len ), },
                  'training_parameters' : _serialize_training_parameters(),
+                 'checkpoint_strategy' : { 'mode' : 'fixed_seeded_val_subset',
+                                           'checkpoint_sample_info' : None if checkpoint_sample_info is None else dict( checkpoint_sample_info ),
+                                           'full_val_audit_interval_epochs' : None if full_val_audit_interval_epochs is None else int( full_val_audit_interval_epochs ), },
                  'best_val_loss' : float( best_loss ),
                  'best_val_checkpoint_score' : float( best_loss ),
                  'best_val_checkpoint_metrics' : None if checkpoint_metrics is None else dict( checkpoint_metrics ),
+                 'full_val_metrics' : None if full_val_metrics is None else dict( full_val_metrics ),
                  'test_metrics' : dict( metrics ), }
     with open( metadata_path, 'w' ) as handle:
         json.dump( metadata, handle, indent=2, sort_keys=True )
@@ -383,8 +608,9 @@ def train_scout( dataset_root,
                  model_file=None,
                  start_epoch=1,
                  n_epochs=None,
-                 eval_batch_size=4096 ):
+                  eval_batch_size=4096 ):
     print( 'Scout training initiated' )
+    eval_device = resolve_device( device )
 
     train_files = discover_split_files( dataset_root, 'train' )
     val_files = discover_split_files( dataset_root, 'val' )
@@ -441,17 +667,32 @@ def train_scout( dataset_root,
            ', std=' + format( scalar_stats[ 'ccs_std' ], '.6f' ) )
 
     # Test rows feed only the passive mini-eval dashboard; checkpoint selection stays on validation data.
+    mini_eval_batch_size = max( 1, min( int(eval_batch_size), MINI_EVAL_BATCH_SIZE_CAP ) )
     mini_eval_loader, mini_eval_info = build_fixed_mini_eval_loader( test_files,
                                                                      scalar_stats,
-                                                                     eval_batch_size,
+                                                                     mini_eval_batch_size,
                                                                      sample_rows=MINI_EVAL_SAMPLE_ROWS,
                                                                      seed=MINI_EVAL_SEED )
     print( 'Mini-eval test sample: rows=' + str( mini_eval_info[ 'sample_rows_actual' ] ) +
            ' of ' + str( mini_eval_info[ 'rows_seen' ] ) +
+           ', batch_size=' + str( mini_eval_info[ 'batch_size' ] ) +
            ', seed=' + str( mini_eval_info[ 'seed' ] ) +
            ', MS2=' + str( mini_eval_info[ 'ms2_rows' ] ) +
            ', iRT=' + str( mini_eval_info[ 'irt_rows' ] ) +
            ', CCS=' + str( mini_eval_info[ 'ccs_rows' ] ) )
+
+    val_checkpoint_loader, val_checkpoint_info = build_fixed_val_checkpoint_loader( val_files,
+                                                                                    scalar_stats,
+                                                                                    eval_batch_size,
+                                                                                    sample_rows=VAL_CHECKPOINT_SAMPLE_ROWS,
+                                                                                    seed=VAL_CHECKPOINT_SEED )
+    print( 'Val checkpoint sample: rows=' + str( val_checkpoint_info[ 'sample_rows_actual' ] ) +
+           ' of ' + str( val_checkpoint_info[ 'rows_seen' ] ) +
+           ', batch_size=' + str( val_checkpoint_info[ 'batch_size' ] ) +
+           ', seed=' + str( val_checkpoint_info[ 'seed' ] ) +
+           ', MS2=' + str( val_checkpoint_info[ 'ms2_rows' ] ) +
+           ', iRT=' + str( val_checkpoint_info[ 'irt_rows' ] ) +
+           ', CCS=' + str( val_checkpoint_info[ 'ccs_rows' ] ) )
 
     datasets = { 'train' : ScoutDistilledDataset( train_files,
                                                   scalar_stats[ 'irt_mean' ],
@@ -473,12 +714,18 @@ def train_scout( dataset_root,
     num_epochs = n_epochs if n_epochs is not None else training_parameters[ 'n_epochs' ]
     mini_eval_reporter = ScoutMiniEvalReporter( mini_eval_loader,
                                                 scalar_stats,
-                                                resolve_device( device ),
+                                                eval_device,
                                                 interval_batches=MINI_EVAL_INTERVAL_BATCHES )
-    checkpoint_metric = ScoutCheckpointMetric( scalar_stats,
-                                              resolve_device( device ),
+    checkpoint_metric = ScoutCheckpointMetric( val_checkpoint_loader,
+                                              val_checkpoint_info,
+                                              scalar_stats,
+                                              eval_device,
                                               eval_batch_size,
-                                              num_workers )
+                                              num_workers,
+                                              full_dataset=datasets[ 'val' ],
+                                              expected_rows=val_scan[ 'rows_tokenized' ],
+                                              progress_tick_rows=progress_tick_rows,
+                                              full_eval_every_epochs=FULL_VAL_AUDIT_INTERVAL_EPOCHS )
 
     best_checkpoint_score = train_model( model,
                                          datasets,
@@ -497,17 +744,35 @@ def train_scout( dataset_root,
                                          checkpoint_metric_callback=checkpoint_metric,
                                          report_epoch_loss=False,
                                          checkpoint_phase='val',
+                                         skip_batch_phases={ 'val' },
                                          patience=patience,
-                                         start_epoch=start_epoch )
+                                         start_epoch=start_epoch,
+                                         max_train_batches_per_epoch=training_parameters.get( 'max_train_batches_per_epoch' ) )
+
+    best_model = initialize_scout_model( model_file=output_file_name, map_location='cpu' )
+    full_val_metrics, full_val_eval_batch_size = evaluate_scout_dataset( best_model,
+                                                                         datasets[ 'val' ],
+                                                                         scalar_stats,
+                                                                         eval_batch_size,
+                                                                         num_workers,
+                                                                         device=eval_device,
+                                                                         label='Final full val',
+                                                                         expected_rows=val_scan[ 'rows_tokenized' ],
+                                                                         progress_tick_rows=progress_tick_rows,
+                                                                         return_effective_batch_size=True )
 
     # Final test evaluation runs once after the best checkpoint is frozen from validation metrics.
     best_model = initialize_scout_model( model_file=output_file_name, map_location='cpu' )
-    metrics = evaluate_scout( best_model,
-                              test_files,
-                              scalar_stats,
-                              eval_batch_size,
-                              num_workers,
-                              device='cpu' )
+    metrics, final_eval_batch_size = evaluate_scout( best_model,
+                                                     test_files,
+                                                     scalar_stats,
+                                                     eval_batch_size,
+                                                     num_workers,
+                                                     device=eval_device,
+                                                     label='Final test',
+                                                     expected_rows=test_scan[ 'rows_tokenized' ],
+                                                     progress_tick_rows=progress_tick_rows,
+                                                     return_effective_batch_size=True )
 
     metadata_path = output_file_name + '.metadata.json'
     write_metadata( metadata_path,
@@ -522,9 +787,22 @@ def train_scout( dataset_root,
                     test_scan,
                     metrics,
                     best_checkpoint_score,
-                    checkpoint_metrics=checkpoint_metric.last_metrics )
+                    checkpoint_metrics=checkpoint_metric.last_metrics,
+                    full_val_metrics=full_val_metrics,
+                    checkpoint_sample_info=val_checkpoint_info,
+                    full_val_audit_interval_epochs=FULL_VAL_AUDIT_INTERVAL_EPOCHS )
 
     print( 'Best val checkpoint score: ' + format( float(best_checkpoint_score), '.6f' ) )
+    print( 'Final full val eval batch size: ' + str( full_val_eval_batch_size ) )
+    print( 'Full val MS2 cosine: ' + format( full_val_metrics[ 'test_ms2_cosine' ], '.6f' ) +
+           ' (n=' + str(full_val_metrics[ 'test_ms2_count' ]) + ')' )
+    print( 'Full val iRT MAE/RMSE: ' + format( full_val_metrics[ 'test_irt_mae' ], '.6f' ) +
+           ' / ' + format( full_val_metrics[ 'test_irt_rmse' ], '.6f' ) +
+           ' (n=' + str(full_val_metrics[ 'test_irt_count' ]) + ')' )
+    print( 'Full val CCS MAE/RMSE: ' + format( full_val_metrics[ 'test_ccs_mae' ], '.6f' ) +
+           ' / ' + format( full_val_metrics[ 'test_ccs_rmse' ], '.6f' ) +
+           ' (n=' + str(full_val_metrics[ 'test_ccs_count' ]) + ')' )
+    print( 'Final test eval batch size: ' + str( final_eval_batch_size ) )
     print( 'Test MS2 cosine: ' + format( metrics[ 'test_ms2_cosine' ], '.6f' ) +
            ' (n=' + str(metrics[ 'test_ms2_count' ]) + ')' )
     print( 'Test iRT MAE/RMSE: ' + format( metrics[ 'test_irt_mae' ], '.6f' ) +

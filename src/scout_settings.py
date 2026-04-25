@@ -1,19 +1,20 @@
 import torch
 
 
-hyperparameters = { 'embed_dimension' : 80,
+hyperparameters = { 'embed_dimension' : 128,
                     'nce_encode_dimension' : 16,
                     'n_resnet_blocks' : 3,
-                    'kernel_size' : 7,
+                    'kernel_size' : 9,
                     'activation_function' : 'relu',
                   }
 
 training_parameters = { 'n_epochs' : 200,
-                        'learning_rate' : 1e-3,
-                        'dropout_rate' : 0.10,
+                        'learning_rate' : 3e-4,
+                        'dropout_rate' : 0.18,
                         'initial_batch_size' : 64,
                         'epochs_to_2x_batch' : 60,
                         'max_batch_size' : 16384,
+                        'max_train_batches_per_epoch' : 50000,
                         'optimizer' : torch.optim.Adam,
                         'train_device' : 'auto',
                         'eval_device' : 'auto', }

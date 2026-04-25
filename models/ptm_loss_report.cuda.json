@@ -1,0 +1,426 @@
+{
+  "generated_at_utc": "2026-03-13T14:39:30Z",
+  "device": "cuda",
+  "models": {
+    "Sculptor": {
+      "model_name": "Sculptor",
+      "average_rmse": 15.720550432080117,
+      "train_counts": {
+        "Unmodified": 1026028,
+        "Carbamidomethyl": 201796,
+        "Acetyl": 11433,
+        "Deamidation": 2606,
+        "Oxidation": 168008,
+        "Phospho": 18202,
+        "GlyGly (Ub)": 14736,
+        "Cysteinyl": 385,
+        "Malonyl": 3599,
+        "Nitro": 109,
+        "Butyryl": 241,
+        "Dimethyl": 443,
+        "Glutarylation": 254,
+        "Methyl": 438,
+        "Propionyl": 89,
+        "Succinyl": 259,
+        "Trimethyl": 244,
+        "Hydroxyisobutyryl": 247,
+        "Crotonyl": 199,
+        "Formyl": 196,
+        "Biotin": 110,
+        "HexNAc": 90,
+        "Glycosyl hydroxyproline": 110
+      },
+      "ptm_rmse": {
+        "Unmodified": 15.62776608885282,
+        "Acetyl": 16.75196010798099,
+        "Carbamidomethyl": 18.595191528546668,
+        "Oxidation": 16.956651384148483,
+        "GlyGly (Ub)": 14.706894457538027,
+        "Phospho": 14.892894002101626,
+        "Deamidation": 19.396777694220734,
+        "Malonyl": 10.584357981869783,
+        "Dimethyl": 13.955719503040317,
+        "Methyl": 14.490219991629866,
+        "Biotin": 6.5882796540081,
+        "Crotonyl": 11.802189634849054,
+        "Formyl": 12.449339077760692,
+        "Butyryl": 14.835051533670857,
+        "Glutarylation": 13.558359058145376,
+        "Succinyl": 11.844729965082296,
+        "Hydroxyisobutyryl": 13.984322624004466,
+        "Cysteinyl": 10.312974631799634,
+        "Trimethyl": 10.061824964060499,
+        "HexNAc": 16.72661742612477,
+        "Nitro": 7.701622704729697,
+        "Propionyl": 12.311762876688084,
+        "Glycosyl hydroxyproline": 18.097256432346484
+      },
+      "n_eval_samples": 304602,
+      "skipped_invalid_rows": 0,
+      "eval_metric": "RMSE(CCS)"
+    },
+    "Electrician": {
+      "model_name": "Electrician",
+      "average_rmse": 0.09792870395184189,
+      "train_counts": {
+        "Unmodified": 454151,
+        "Carbamidomethyl": 176517,
+        "TMT6plex": 724977,
+        "Oxidation": 190861,
+        "GlyGly (Ub)": 41169,
+        "Phospho": 79984,
+        "Acetyl": 35212,
+        "Pyro-Glu": 5473,
+        "Methyl": 14725,
+        "Deamidation": 2080,
+        "HexNAc": 2754
+      },
+      "ptm_rmse": {
+        "TMT6plex": 0.08217858702136116,
+        "Unmodified": 0.10981891585623135,
+        "Carbamidomethyl": 0.09719856966371404,
+        "Acetyl": 0.09081702902641572,
+        "Oxidation": 0.09942434825514249,
+        "Phospho": 0.09014548561993468,
+        "Methyl": 0.09506334011059549,
+        "GlyGly (Ub)": 0.11968312348248619,
+        "HexNAc": 0.14150938945816185,
+        "Pyro-Glu": 0.057196570493006395,
+        "Deamidation": 0.10942854464921713
+      },
+      "n_eval_samples": 161443,
+      "skipped_tokenization": 145,
+      "arch_overrides": {
+        "embed_dim": 24,
+        "n_blocks": 3,
+        "kernel": 5,
+        "block_variant": "full",
+        "bottleneck_ratio": 0.5,
+        "dilation_schedule": [
+          1,
+          4,
+          8
+        ]
+      },
+      "eval_metric": "RMSE(charge_state_dist)"
+    },
+    "Chronologer": {
+      "model_name": "Chronologer",
+      "average_rmse": 1.2812313008104421,
+      "train_counts": {
+        "Unmodified": 1524561,
+        "Carbamidomethyl": 400323,
+        "Phospho": 238942,
+        "TMT6plex": 209050,
+        "Oxidation": 264446,
+        "GlyGly (Ub)": 74633,
+        "Acetyl": 24474,
+        "TMT0": 3064,
+        "Pyro-Glu": 4033,
+        "Succinyl": 915,
+        "Dimethyl": 112,
+        "Methyl": 69,
+        "Trimethyl": 31
+      },
+      "ptm_rmse": {
+        "Unmodified": 1.0129470690911082,
+        "GlyGly (Ub)": 0.7429529902863133,
+        "Carbamidomethyl": 1.3923880994822213,
+        "Phospho": 3.199360160724774,
+        "Oxidation": 1.5227260661911972,
+        "Acetyl": 2.3215837190151065,
+        "TMT6plex": 1.9304341818251352,
+        "Succinyl": 0.5440435205017209,
+        "Pyro-Glu": 1.4759424175548717,
+        "TMT0": 1.899152816235885,
+        "Trimethyl": 5.702607936804462,
+        "Dimethyl": 3.9575214176225697,
+        "Methyl": 2.841079445280862
+      },
+      "n_eval_samples": 518553,
+      "skipped_tokenization": 1296,
+      "skipped_too_long": 7299,
+      "skipped_vocab_mismatch": 0,
+      "checkpoint_architecture": {
+        "vec_length": 37,
+        "n_states": 45,
+        "embed_dim": 64,
+        "n_blocks": 3,
+        "kernel_size": 7
+      },
+      "db_delimiter": "tab",
+      "holdout_policy": "Random split following training code: shuffle random_state=2447, test_fraction=0.2",
+      "eval_metric": "RMSE(HI)"
+    },
+    "Cartographer": {
+      "model_name": "Cartographer",
+      "average_rmse": 0.14240627781449275,
+      "train_counts": {
+        "Unmodified": 10287673,
+        "Acetyl": 907017,
+        "TMT6plex": 9402146,
+        "GlyGly (Ub)": 951246,
+        "Pyro-Glu": 233779,
+        "Carbamidomethyl": 2682892,
+        "Phospho": 1748938,
+        "Oxidation": 2779969,
+        "Methyl": 310765,
+        "HexNAc": 91207,
+        "Deamidation": 50339
+      },
+      "ptm_rmse": {
+        "Unmodified": 0.14293609319792153,
+        "GlyGly (Ub)": 0.12341363643199758,
+        "Pyro-Glu": 0.16131617542081292,
+        "Oxidation": 0.13928288196228283,
+        "Carbamidomethyl": 0.12587631735729155,
+        "Phospho": 0.13797199895949436,
+        "TMT6plex": 0.13901778377142182,
+        "Acetyl": 0.14256030073528342,
+        "HexNAc": 0.1266514222614593,
+        "Methyl": 0.129936658330619,
+        "Deamidation": 0.12787721265821864
+      },
+      "n_eval_samples": 3003208,
+      "skipped_tokenization": 415,
+      "eval_metric": "RMSE(fragment_intensity)"
+    }
+  },
+  "table_rows": [
+    {
+      "Modification": "Unmodified",
+      "Sites": "-",
+      "UNIMOD": "-",
+      "Chronologer": "\u2705 79.1%",
+      "Cartographer": "\u2705 100.4%",
+      "Electrician": "\u2705 112.1%",
+      "Sculptor": "\u2705 99.4%"
+    },
+    {
+      "Modification": "Acetyl",
+      "Sites": "K, N-term",
+      "UNIMOD": "1",
+      "Chronologer": "\u26a0\ufe0f 181.2%",
+      "Cartographer": "\u2705 100.1%",
+      "Electrician": "\u2705 92.7%",
+      "Sculptor": "\u2705 106.6%"
+    },
+    {
+      "Modification": "Carbamidomethyl",
+      "Sites": "C",
+      "UNIMOD": "4",
+      "Chronologer": "\u2705 108.7%",
+      "Cartographer": "\u2705 88.4%",
+      "Electrician": "\u2705 99.3%",
+      "Sculptor": "\u2705 118.3%"
+    },
+    {
+      "Modification": "Deamidation",
+      "Sites": "N, Q, R",
+      "UNIMOD": "7",
+      "Chronologer": "N/A",
+      "Cartographer": "\u2705 89.8%",
+      "Electrician": "\u2705 111.7%",
+      "Sculptor": "\u26a0\ufe0f 123.4%"
+    },
+    {
+      "Modification": "Dimethyl",
+      "Sites": "K, R",
+      "UNIMOD": "36",
+      "Chronologer": "\u26a0\ufe0f 308.9%",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 88.8%"
+    },
+    {
+      "Modification": "GlyGly (Ub)",
+      "Sites": "K",
+      "UNIMOD": "121",
+      "Chronologer": "\u2705 58.0%",
+      "Cartographer": "\u2705 86.7%",
+      "Electrician": "\u26a0\ufe0f 122.2%",
+      "Sculptor": "\u2705 93.6%"
+    },
+    {
+      "Modification": "HexNAc",
+      "Sites": "N, S, T",
+      "UNIMOD": "43",
+      "Chronologer": "N/A",
+      "Cartographer": "\u2705 88.9%",
+      "Electrician": "\u26a0\ufe0f 144.5%",
+      "Sculptor": "\u26a0\ufe0f 106.4%"
+    },
+    {
+      "Modification": "Methyl",
+      "Sites": "K, R",
+      "UNIMOD": "34",
+      "Chronologer": "\u26a0\ufe0f 221.7%",
+      "Cartographer": "\u2705 91.2%",
+      "Electrician": "\u2705 97.1%",
+      "Sculptor": "\u26a0\ufe0f 92.2%"
+    },
+    {
+      "Modification": "Oxidation",
+      "Sites": "M, W",
+      "UNIMOD": "35",
+      "Chronologer": "\u2705 118.8%",
+      "Cartographer": "\u2705 97.8%",
+      "Electrician": "\u2705 101.5%",
+      "Sculptor": "\u2705 107.9%"
+    },
+    {
+      "Modification": "Phospho",
+      "Sites": "S, T, Y",
+      "UNIMOD": "21",
+      "Chronologer": "\u26a0\ufe0f 249.7%",
+      "Cartographer": "\u2705 96.9%",
+      "Electrician": "\u2705 92.1%",
+      "Sculptor": "\u2705 94.7%"
+    },
+    {
+      "Modification": "Succinyl",
+      "Sites": "K",
+      "UNIMOD": "64",
+      "Chronologer": "\u26a0\ufe0f 42.5%",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 75.3%"
+    },
+    {
+      "Modification": "Trimethyl",
+      "Sites": "K",
+      "UNIMOD": "37",
+      "Chronologer": "\u26a0\ufe0f 445.1%",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 64.0%"
+    },
+    {
+      "Modification": "Pyro-Glu",
+      "Sites": "Q (N-term), E (N-term)",
+      "UNIMOD": "28, 27",
+      "Chronologer": "\u2705 115.2%",
+      "Cartographer": "\u2705 113.3%",
+      "Electrician": "\u2705 58.4%",
+      "Sculptor": "N/A"
+    },
+    {
+      "Modification": "TMT0",
+      "Sites": "K, N-term",
+      "UNIMOD": "739",
+      "Chronologer": "\u26a0\ufe0f 148.2%",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "N/A"
+    },
+    {
+      "Modification": "TMT6plex",
+      "Sites": "K, N-term",
+      "UNIMOD": "737",
+      "Chronologer": "\u26a0\ufe0f 150.7%",
+      "Cartographer": "\u2705 97.6%",
+      "Electrician": "\u2705 83.9%",
+      "Sculptor": "N/A"
+    },
+    {
+      "Modification": "Biotin",
+      "Sites": "K",
+      "UNIMOD": "3",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 41.9%"
+    },
+    {
+      "Modification": "Butyryl",
+      "Sites": "K",
+      "UNIMOD": "1289",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 94.4%"
+    },
+    {
+      "Modification": "Crotonyl",
+      "Sites": "K",
+      "UNIMOD": "1363",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 75.1%"
+    },
+    {
+      "Modification": "Cysteinyl",
+      "Sites": "C",
+      "UNIMOD": "312",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 65.6%"
+    },
+    {
+      "Modification": "Formyl",
+      "Sites": "K",
+      "UNIMOD": "122",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 79.2%"
+    },
+    {
+      "Modification": "Glutarylation",
+      "Sites": "K",
+      "UNIMOD": "1848",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 86.2%"
+    },
+    {
+      "Modification": "Glycosyl hydroxyproline",
+      "Sites": "P",
+      "UNIMOD": "408",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 115.1%"
+    },
+    {
+      "Modification": "Hydroxyisobutyryl",
+      "Sites": "K",
+      "UNIMOD": "1849",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 89.0%"
+    },
+    {
+      "Modification": "Malonyl",
+      "Sites": "K",
+      "UNIMOD": "747",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u2705 67.3%"
+    },
+    {
+      "Modification": "Nitro",
+      "Sites": "Y",
+      "UNIMOD": "354",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 49.0%"
+    },
+    {
+      "Modification": "Propionyl",
+      "Sites": "K, N-term",
+      "UNIMOD": "58",
+      "Chronologer": "N/A",
+      "Cartographer": "N/A",
+      "Electrician": "N/A",
+      "Sculptor": "\u26a0\ufe0f 78.3%"
+    }
+  ],
+  "markdown": "## Supported Modifications\n\nValues are `%RMSE vs model average RMSE` on each model holdout/test set.\n`\u2705` indicates `<120%` and `>1000` PTM occurrences in that model's training split; otherwise `\u26a0\ufe0f`.\n\n| Modification | Sites | UNIMOD | Chronologer | Cartographer | Electrician | Sculptor |\n| --- | --- | --- | --- | --- | --- | --- |\n| Unmodified | - | - | \u2705 79.1% | \u2705 100.4% | \u2705 112.1% | \u2705 99.4% |\n| Acetyl | K, N-term | 1 | \u26a0\ufe0f 181.2% | \u2705 100.1% | \u2705 92.7% | \u2705 106.6% |\n| Carbamidomethyl | C | 4 | \u2705 108.7% | \u2705 88.4% | \u2705 99.3% | \u2705 118.3% |\n| Deamidation | N, Q, R | 7 | N/A | \u2705 89.8% | \u2705 111.7% | \u26a0\ufe0f 123.4% |\n| Dimethyl | K, R | 36 | \u26a0\ufe0f 308.9% | N/A | N/A | \u26a0\ufe0f 88.8% |\n| GlyGly (Ub) | K | 121 | \u2705 58.0% | \u2705 86.7% | \u26a0\ufe0f 122.2% | \u2705 93.6% |\n| HexNAc | N, S, T | 43 | N/A | \u2705 88.9% | \u26a0\ufe0f 144.5% | \u26a0\ufe0f 106.4% |\n| Methyl | K, R | 34 | \u26a0\ufe0f 221.7% | \u2705 91.2% | \u2705 97.1% | \u26a0\ufe0f 92.2% |\n| Oxidation | M, W | 35 | \u2705 118.8% | \u2705 97.8% | \u2705 101.5% | \u2705 107.9% |\n| Phospho | S, T, Y | 21 | \u26a0\ufe0f 249.7% | \u2705 96.9% | \u2705 92.1% | \u2705 94.7% |\n| Succinyl | K | 64 | \u26a0\ufe0f 42.5% | N/A | N/A | \u26a0\ufe0f 75.3% |\n| Trimethyl | K | 37 | \u26a0\ufe0f 445.1% | N/A | N/A | \u26a0\ufe0f 64.0% |\n| Pyro-Glu | Q (N-term), E (N-term) | 28, 27 | \u2705 115.2% | \u2705 113.3% | \u2705 58.4% | N/A |\n| TMT0 | K, N-term | 739 | \u26a0\ufe0f 148.2% | N/A | N/A | N/A |\n| TMT6plex | K, N-term | 737 | \u26a0\ufe0f 150.7% | \u2705 97.6% | \u2705 83.9% | N/A |\n| Biotin | K | 3 | N/A | N/A | N/A | \u26a0\ufe0f 41.9% |\n| Butyryl | K | 1289 | N/A | N/A | N/A | \u26a0\ufe0f 94.4% |\n| Crotonyl | K | 1363 | N/A | N/A | N/A | \u26a0\ufe0f 75.1% |\n| Cysteinyl | C | 312 | N/A | N/A | N/A | \u26a0\ufe0f 65.6% |\n| Formyl | K | 122 | N/A | N/A | N/A | \u26a0\ufe0f 79.2% |\n| Glutarylation | K | 1848 | N/A | N/A | N/A | \u26a0\ufe0f 86.2% |\n| Glycosyl hydroxyproline | P | 408 | N/A | N/A | N/A | \u26a0\ufe0f 115.1% |\n| Hydroxyisobutyryl | K | 1849 | N/A | N/A | N/A | \u26a0\ufe0f 89.0% |\n| Malonyl | K | 747 | N/A | N/A | N/A | \u2705 67.3% |\n| Nitro | Y | 354 | N/A | N/A | N/A | \u26a0\ufe0f 49.0% |\n| Propionyl | K, N-term | 58 | N/A | N/A | N/A | \u26a0\ufe0f 78.3% |\n\n### Average Model Loss (RMSE Baseline)\n\n- `Chronologer` average `RMSE(HI)` = `1.281231`\n- `Cartographer` average `RMSE(fragment_intensity)` = `0.142406`\n- `Electrician` average `RMSE(charge_state_dist)` = `0.097929`\n- `Sculptor` average `RMSE(CCS)` = `15.720550`\n"
+}
