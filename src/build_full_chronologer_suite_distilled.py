@@ -49,6 +49,7 @@ ROW_SCHEMA = pa.schema(
     [
         pa.field( 'modified_sequence', pa.string(), nullable=False ),
         pa.field( 'precursor_charge_onehot', pa.list_( pa.int32() ), nullable=False ),
+        pa.field( 'charge_state_dist', pa.list_( pa.float32() ), nullable=False ),
         pa.field( 'collision_energy_aligned_normed', pa.float64(), nullable=False ),
         pa.field( 'indexed_retention_time', pa.float64(), nullable=True ),
         pa.field( 'ccs', pa.float64(), nullable=True ),
@@ -104,6 +105,7 @@ class SplitParquetWriter( object ):
         return {
             'modified_sequence' : [],
             'precursor_charge_onehot' : [],
+            'charge_state_dist' : [],
             'collision_energy_aligned_normed' : [],
             'indexed_retention_time' : [],
             'ccs' : [],
@@ -636,6 +638,7 @@ def process_chunk( args,
                 row = {
                     'modified_sequence' : record[ 'modified_sequence' ],
                     'precursor_charge_onehot' : charge_ohe,
+                    'charge_state_dist' : record[ 'charge_distribution' ],
                     'collision_energy_aligned_normed' : float( nce_norm ),
                     'indexed_retention_time' : record[ 'indexed_retention_time' ],
                     'ccs' : ccs_value,
