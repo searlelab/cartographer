@@ -5,6 +5,7 @@ import sys
 
 import torch
 
+from electrician_settings import charge_dist_len
 from scout_model import initialize_scout_model, scout_torchscript_wrapper
 from scout_settings import max_peptide_len, ms2_vector_len
 from tensorize import aa_to_int, nterm_unimod_map, residue_unimod_map, residues
@@ -34,11 +35,12 @@ def build_preprocessing_metadata( model_file ):
                                 [ 'batch', 6 ],
                                 [ 'batch', 1 ] ],
              'input_dtypes' : [ 'int64', 'float32', 'float32' ],
-             'output_names' : [ 'ms2', 'irt', 'ccs' ],
+             'output_names' : [ 'ms2', 'irt', 'ccs', 'charge_dist' ],
              'output_shapes' : [ [ 'batch', ms2_vector_len ],
                                  [ 'batch', 1 ],
-                                 [ 'batch', 1 ] ],
-             'output_dtypes' : [ 'float32', 'float32', 'float32' ],
+                                 [ 'batch', 1 ],
+                                 [ 'batch', charge_dist_len ] ],
+             'output_dtypes' : [ 'float32', 'float32', 'float32', 'float32' ],
              'scalar_stats' : scalar_stats,
              'ms2_ion_order' : 'y1(1+), y1(2+), b1(1+), b1(2+), y2(1+), y2(2+), b2(1+), b2(2+), ...', }
 
@@ -80,7 +82,8 @@ def validate_export( model, traced_model, n_tests=5 ):
 
         diffs = [ torch.abs( py_out[ 'ms2' ] - ts_out[0] ).max().item(),
                   torch.abs( py_out[ 'irt' ] - ts_out[1] ).max().item(),
-                  torch.abs( py_out[ 'ccs' ] - ts_out[2] ).max().item() ]
+                  torch.abs( py_out[ 'ccs' ] - ts_out[2] ).max().item(),
+                  torch.abs( py_out[ 'charge_dist' ] - ts_out[3] ).max().item() ]
         max_diff = max( [ max_diff ] + diffs )
 
     print( 'Validation max absolute diff: ' + format( max_diff, '.2e' ) )

@@ -13,7 +13,7 @@ from training_loop import resolve_device
 
 
 def parse_args( args ):
-    parser = argparse.ArgumentParser( description='Predict MS2, iRT, and CCS with Scout' )
+    parser = argparse.ArgumentParser( description='Predict MS2, iRT, CCS, and charge distribution with Scout' )
     parser.add_argument( '--model_file', type=str, required=True,
                          help='Path to trained Scout checkpoint (.pt)' )
     parser.add_argument( '--modified_sequence', type=str, required=True,
@@ -65,12 +65,14 @@ def main():
     irt = float( outputs[ 'irt' ][0, 0].cpu().item() * scalar_stats[ 'irt_std' ] + scalar_stats[ 'irt_mean' ] )
     ccs = float( outputs[ 'ccs' ][0, 0].cpu().item() * scalar_stats[ 'ccs_std' ] + scalar_stats[ 'ccs_mean' ] )
     ms2 = outputs[ 'ms2' ][0].cpu().numpy().tolist()
+    charge_dist = outputs[ 'charge_dist' ][0].cpu().numpy().tolist()
 
     print( json.dumps( { 'modified_sequence' : args.modified_sequence,
                          'precursor_charge' : int( args.precursor_charge ),
                          'nce' : float( args.nce ),
                          'irt' : irt,
                          'ccs' : ccs,
+                         'charge_dist' : charge_dist,
                          'ms2' : ms2 }, indent=2 ) )
 
 
