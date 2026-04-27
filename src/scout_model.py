@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from electrician_settings import charge_dist_len
 import scout_settings
 from constants import max_precursor_charge, min_precursor_charge
 from core_layers import resnet_block
@@ -88,9 +89,12 @@ class scout_ms2_head( nn.Module ):
 class scout_irt_head( nn.Module ):
     def __init__( self, pooled_dim, embed_dim, act_fx ):
         super().__init__()
+        hidden_dim = max( 1, embed_dim // 2 )
         self.layers = nn.Sequential( _init_linear( nn.Linear( pooled_dim, embed_dim ) ),
                                      nn.ReLU() if act_fx == 'relu' else nn.Identity(),
-                                     _init_linear( nn.Linear( embed_dim, 1 ) ) )
+                                     _init_linear( nn.Linear( embed_dim, hidden_dim ) ),
+                                     nn.ReLU() if act_fx == 'relu' else nn.Identity(),
+                                     _init_linear( nn.Linear( hidden_dim, 1 ) ) )
 
     def forward( self, pooled_features ):
         return self.layers( pooled_features )
@@ -99,12 +103,29 @@ class scout_irt_head( nn.Module ):
 class scout_ccs_head( nn.Module ):
     def __init__( self, pooled_dim, embed_dim, n_charges, act_fx ):
         super().__init__()
+        hidden_dim = max( 1, embed_dim // 2 )
         self.layers = nn.Sequential( _init_linear( nn.Linear( pooled_dim + n_charges, embed_dim ) ),
                                      nn.ReLU() if act_fx == 'relu' else nn.Identity(),
-                                     _init_linear( nn.Linear( embed_dim, 1 ) ) )
+                                     _init_linear( nn.Linear( embed_dim, hidden_dim ) ),
+                                     nn.ReLU() if act_fx == 'relu' else nn.Identity(),
+                                     _init_linear( nn.Linear( hidden_dim, 1 ) ) )
 
     def forward( self, pooled_features, charge ):
         return self.layers( torch.cat( [ pooled_features, charge ], dim=1 ) )
+
+
+class scout_charge_dist_head( nn.Module ):
+    def __init__( self, pooled_dim, embed_dim, n_charges, act_fx ):
+        super().__init__()
+        hidden_dim = max( 1, embed_dim // 2 )
+        self.layers = nn.Sequential( _init_linear( nn.Linear( pooled_dim, embed_dim ) ),
+                                     nn.ReLU() if act_fx == 'relu' else nn.Identity(),
+                                     _init_linear( nn.Linear( embed_dim, hidden_dim ) ),
+                                     nn.ReLU() if act_fx == 'relu' else nn.Identity(),
+                                     _init_linear( nn.Linear( hidden_dim, n_charges ) ) )
+
+    def forward( self, pooled_features ):
+        return torch.softmax( self.layers( pooled_features ), dim=1 )
 
 
 class scout_model( nn.Module ):
@@ -119,6 +140,7 @@ class scout_model( nn.Module ):
         self.ms2_head = scout_ms2_head( embed_dim, n_ion_channels, n_charges, kernel, act_fx )
         self.irt_head = scout_irt_head( embed_dim, embed_dim, act_fx )
         self.ccs_head = scout_ccs_head( embed_dim, embed_dim, n_charges, act_fx )
+        self.charge_dist_head = scout_charge_dist_head( embed_dim, embed_dim, charge_dist_len, act_fx )
 
     def forward_shared( self, seq, charge, nce ):
         seq_features, pooled_features = self.encoder( seq )
@@ -131,7 +153,8 @@ class scout_model( nn.Module ):
         pooled_features = shared[ 'pooled_features' ]
         return { 'ms2' : self.ms2_head( seq_features, charge, nce ),
                  'irt' : self.irt_head( pooled_features ),
-                 'ccs' : self.ccs_head( pooled_features, charge ), }
+                 'ccs' : self.ccs_head( pooled_features, charge ),
+                 'charge_dist' : self.charge_dist_head( pooled_features ), }
 
 
 class scout_torchscript_wrapper( nn.Module ):
@@ -141,7 +164,7 @@ class scout_torchscript_wrapper( nn.Module ):
 
     def forward( self, seq, charge, nce ):
         outputs = self.model( seq, charge, nce )
-        return outputs[ 'ms2' ], outputs[ 'irt' ], outputs[ 'ccs' ]
+        return outputs[ 'ms2' ], outputs[ 'irt' ], outputs[ 'ccs' ], outputs[ 'charge_dist' ]
 
 
 def initialize_scout_model( model_file=None, map_location=None ):

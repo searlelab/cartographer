@@ -66,7 +66,9 @@ def train_model( model,
                  skip_batch_phases=None,
                  patience=None,
                  start_epoch=1,
-                 max_train_batches_per_epoch=None, ):
+                 max_train_batches_per_epoch=None,
+                 initial_best_loss=None,
+                 initial_best_epoch=0, ):
 
     s_time = time.time()
 
@@ -93,8 +95,8 @@ def train_model( model,
     devices = dict( [ ( p, train_device ) if p == 'train'
                       else ( p, other_device ) for p in phases ] )
 
-    best_epoch = 0
-    best_loss = 1e40
+    best_epoch = int( initial_best_epoch ) if initial_best_epoch is not None else 0
+    best_loss = float( initial_best_loss ) if initial_best_loss is not None else 1e40
     tolerance = 1e-4
     epochs_wo_improv = 0
 
@@ -245,16 +247,48 @@ def train_model( model,
                 #MAEs = loss_fx.source_b.weight.cpu().detach().numpy().tolist()[0]
                 #for t, learned_mae in enumerate( MAEs ):
                 #    print( '\t' + unique_sources[t].ljust(25) + format(learned_mae,'.3f') )
-                if checkpoint_loss < best_loss-tolerance:
-                    print("New best weights! Copying and saving model")
-                    best_epoch = epoch
-                    best_loss = checkpoint_loss
-                    torch.save( model.state_dict(), file_name )
-                    epochs_wo_improv = 0
+                fast_candidate_improved = checkpoint_loss < best_loss-tolerance
+                if fast_candidate_improved:
+                    promoted = True
+                    promoted_best_epoch = epoch
+                    promoted_best_loss = checkpoint_loss
+                    reset_patience = True
+                    if checkpoint_metric_callback is not None and hasattr( checkpoint_metric_callback, 'handle_checkpoint_candidate' ):
+                        candidate_result = checkpoint_metric_callback.handle_checkpoint_candidate( model=model,
+                                                                                                  file_name=file_name,
+                                                                                                  epoch=epoch,
+                                                                                                  checkpoint_loss=float(checkpoint_loss),
+                                                                                                  prior_best_loss=float(best_loss),
+                                                                                                  prior_best_epoch=int(best_epoch),
+                                                                                                  tolerance=float(tolerance) )
+                        if candidate_result is not None:
+                            promoted = bool( candidate_result.get( 'promoted', True ) )
+                            promoted_best_epoch = int( candidate_result.get( 'best_epoch', best_epoch if not promoted else epoch ) )
+                            promoted_best_loss = float( candidate_result.get( 'best_loss', best_loss if not promoted else checkpoint_loss ) )
+                            reset_patience = bool( candidate_result.get( 'reset_patience', promoted ) )
+                    else:
+                        print("New best weights! Copying and saving model")
+                        torch.save( model.state_dict(), file_name )
+
+                    if promoted:
+                        best_epoch = promoted_best_epoch
+                        best_loss = promoted_best_loss
+                        if reset_patience:
+                            epochs_wo_improv = 0
+                    else:
+                        epochs_wo_improv += 1
+                        print( 'Fast checkpoint improved, but promoted best remains epoch ' +
+                               str(best_epoch) + ' (' + format(best_loss,'.4f') + ')' )
                 else:
                     epochs_wo_improv += 1
                     print( 'Did not improve, best performance was epoch ' +
                            str(best_epoch) + ' (' + format(best_loss,'.4f') + ')' )
+                if checkpoint_metric_callback is not None and hasattr( checkpoint_metric_callback, 'post_checkpoint_update' ):
+                    checkpoint_metric_callback.post_checkpoint_update( file_name,
+                                                                      epoch,
+                                                                      best_loss,
+                                                                      best_epoch,
+                                                                      fast_candidate_improved )
         if epoch_callback is not None:
             epoch_callback( model, epoch )
 

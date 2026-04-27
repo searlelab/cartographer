@@ -9,8 +9,8 @@ hyperparameters = { 'embed_dimension' : 128,
                   }
 
 training_parameters = { 'n_epochs' : 200,
-                        'learning_rate' : 3e-4,
-                        'dropout_rate' : 0.18,
+                        'learning_rate' : 2e-4,
+                        'dropout_rate' : 0.10,
                         'initial_batch_size' : 64,
                         'epochs_to_2x_batch' : 60,
                         'max_batch_size' : 16384,

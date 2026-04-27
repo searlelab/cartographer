@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,13 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from constants import seed as default_seed
-from scout_loader import ScoutDistilledDataset, discover_split_files, scan_distilled_dataset
+from electrician_settings import charge_dist_len
+from scout_loader import ( SCOUT_CCS_OFFSET,
+                           SCOUT_CHARGE_DIST_OFFSET,
+                           SCOUT_IRT_OFFSET,
+                           ScoutDistilledDataset,
+                           discover_split_files,
+                           scan_distilled_dataset )
 from scout_loss import ScoutMultiTaskLoss
 from scout_model import initialize_scout_model
 from scout_settings import hyperparameters, max_peptide_len, metadata_filename, ms2_vector_len, n_ion_channels, progress_tick_rows, training_parameters
@@ -28,6 +35,12 @@ EVAL_MIN_BATCH_SIZE = 1
 VAL_CHECKPOINT_SAMPLE_ROWS = 262144
 VAL_CHECKPOINT_SEED = default_seed + 101
 FULL_VAL_AUDIT_INTERVAL_EPOCHS = 10
+CHARGE_CE_BASELINE = 1.257231
+CHECKPOINT_SCORE_WEIGHTS = { 'ms2' : 2.0 / 5.0,
+                             'irt' : 1.0 / 5.0,
+                             'ccs' : 1.0 / 5.0,
+                             'charge_dist' : 1.0 / 5.0, }
+DATASET_STATS_CACHE_NAME = 'scout_dataset_stats.json'
 
 
 def parse_args( args ):
@@ -97,7 +110,109 @@ def _stats_to_summary( stats ):
              'ms2_rows' : int( stats[ 'ms2_rows' ] ),
              'irt_rows' : int( stats[ 'irt_rows' ] ),
              'ccs_rows' : int( stats[ 'ccs_rows' ] ),
+             'charge_dist_rows' : int( stats[ 'charge_dist_rows' ] ),
              'skip_counts' : dict( sorted( stats[ 'skip_counts' ].items() ) ), }
+
+
+def _cache_path( dataset_root ):
+    return os.path.join( dataset_root, DATASET_STATS_CACHE_NAME )
+
+
+def _split_signature( parquet_files ):
+    return [ os.path.basename( path ) for path in sorted( parquet_files ) ]
+
+
+def _cache_payload_is_compatible( payload, train_files, val_files, test_files ):
+    if not isinstance( payload, dict ):
+        return False
+    split_files = payload.get( 'split_files', {} )
+    return split_files.get( 'train' ) == _split_signature( train_files ) and \
+           split_files.get( 'val' ) == _split_signature( val_files ) and \
+           split_files.get( 'test' ) == _split_signature( test_files )
+
+
+def _load_cached_dataset_stats( dataset_root, train_files, val_files, test_files ):
+    cache_path = _cache_path( dataset_root )
+    if not os.path.isfile( cache_path ):
+        return None
+
+    with open( cache_path, 'r' ) as handle:
+        payload = json.load( handle )
+
+    if not _cache_payload_is_compatible( payload, train_files, val_files, test_files ):
+        print( 'Scout dataset stats cache does not match current split files; rescanning dataset.' )
+        return None
+
+    coverage = payload.get( 'coverage', {} )
+    scalar_stats = payload.get( 'scalar_stats', {} )
+    required_splits = [ 'train', 'val', 'test' ]
+    required_scalar_keys = [ 'irt_mean', 'irt_std', 'ccs_mean', 'ccs_std' ]
+
+    if any( split not in coverage for split in required_splits ):
+        print( 'Scout dataset stats cache is missing split coverage; rescanning dataset.' )
+        return None
+    if any( key not in scalar_stats for key in required_scalar_keys ):
+        print( 'Scout dataset stats cache is missing scalar stats; rescanning dataset.' )
+        return None
+
+    print( 'Loaded Scout dataset stats cache: ' + cache_path )
+    return { 'train_scan' : coverage[ 'train' ],
+             'val_scan' : coverage[ 'val' ],
+             'test_scan' : coverage[ 'test' ],
+             'scalar_stats' : { 'irt_mean' : float( scalar_stats[ 'irt_mean' ] ),
+                                'irt_std' : float( scalar_stats[ 'irt_std' ] ),
+                                'ccs_mean' : float( scalar_stats[ 'ccs_mean' ] ),
+                                'ccs_std' : float( scalar_stats[ 'ccs_std' ] ), }, }
+
+
+def _write_cached_dataset_stats( dataset_root,
+                                 train_files,
+                                 val_files,
+                                 test_files,
+                                 train_scan,
+                                 val_scan,
+                                 test_scan,
+                                 scalar_stats ):
+    cache_path = _cache_path( dataset_root )
+    payload = { 'schema_version' : 1,
+                'created_at_utc' : datetime.now( timezone.utc ).strftime( '%Y-%m-%dT%H:%M:%SZ' ),
+                'dataset_root' : os.path.abspath( dataset_root ),
+                'split_files' : { 'train' : _split_signature( train_files ),
+                                  'val' : _split_signature( val_files ),
+                                  'test' : _split_signature( test_files ), },
+                'coverage' : { 'train' : _stats_to_summary( train_scan ),
+                               'val' : _stats_to_summary( val_scan ),
+                               'test' : _stats_to_summary( test_scan ), },
+                'scalar_stats' : { 'irt_mean' : float( scalar_stats[ 'irt_mean' ] ),
+                                   'irt_std' : float( scalar_stats[ 'irt_std' ] ),
+                                   'ccs_mean' : float( scalar_stats[ 'ccs_mean' ] ),
+                                   'ccs_std' : float( scalar_stats[ 'ccs_std' ] ), }, }
+    with open( cache_path, 'w' ) as handle:
+        json.dump( payload, handle, indent=2, sort_keys=True )
+    print( 'Wrote Scout dataset stats cache: ' + cache_path )
+
+
+def _scan_or_load_dataset_stats( dataset_root, train_files, val_files, test_files ):
+    cached = _load_cached_dataset_stats( dataset_root, train_files, val_files, test_files )
+    if cached is not None:
+        return cached[ 'train_scan' ], cached[ 'val_scan' ], cached[ 'test_scan' ], cached[ 'scalar_stats' ]
+
+    print( 'Scanning train split...' )
+    train_scan = scan_distilled_dataset( train_files )
+    print( 'Scanning val split...' )
+    val_scan = scan_distilled_dataset( val_files )
+    print( 'Scanning test split...' )
+    test_scan = scan_distilled_dataset( test_files )
+    scalar_stats = _scalar_stats_from_train( train_scan )
+    _write_cached_dataset_stats( dataset_root,
+                                 train_files,
+                                 val_files,
+                                 test_files,
+                                 train_scan,
+                                 val_scan,
+                                 test_scan,
+                                 scalar_stats )
+    return train_scan, val_scan, test_scan, scalar_stats
 
 
 def _scalar_stats_from_train( train_stats ):
@@ -172,7 +287,9 @@ def _evaluate_scout_loader( model,
                'irt_count' : 0,
                'ccs_abs_sum' : 0.0,
                'ccs_sq_sum' : 0.0,
-               'ccs_count' : 0, }
+               'ccs_count' : 0,
+               'charge_ce_sum' : 0.0,
+               'charge_count' : 0, }
 
     with torch.inference_mode():
         for seq, charge, nce, target_bundle, mask_bundle in loader:
@@ -211,7 +328,7 @@ def _evaluate_scout_loader( model,
             mask_irt = mask_bundle[ :, 1 ] > 0.5
             if torch.any( mask_irt ):
                 pred_irt = pred[ 'irt' ][ mask_irt, 0 ] * scalar_stats[ 'irt_std' ] + scalar_stats[ 'irt_mean' ]
-                true_irt = target_bundle[ mask_irt, ms2_vector_len ] * scalar_stats[ 'irt_std' ] + scalar_stats[ 'irt_mean' ]
+                true_irt = target_bundle[ mask_irt, SCOUT_IRT_OFFSET ] * scalar_stats[ 'irt_std' ] + scalar_stats[ 'irt_mean' ]
                 diff_irt = pred_irt - true_irt
                 totals[ 'irt_abs_sum' ] += float( torch.sum( torch.abs( diff_irt ) ).item() )
                 totals[ 'irt_sq_sum' ] += float( torch.sum( diff_irt * diff_irt ).item() )
@@ -220,11 +337,19 @@ def _evaluate_scout_loader( model,
             mask_ccs = mask_bundle[ :, 2 ] > 0.5
             if torch.any( mask_ccs ):
                 pred_ccs = pred[ 'ccs' ][ mask_ccs, 0 ] * scalar_stats[ 'ccs_std' ] + scalar_stats[ 'ccs_mean' ]
-                true_ccs = target_bundle[ mask_ccs, ms2_vector_len + 1 ] * scalar_stats[ 'ccs_std' ] + scalar_stats[ 'ccs_mean' ]
+                true_ccs = target_bundle[ mask_ccs, SCOUT_CCS_OFFSET ] * scalar_stats[ 'ccs_std' ] + scalar_stats[ 'ccs_mean' ]
                 diff_ccs = pred_ccs - true_ccs
                 totals[ 'ccs_abs_sum' ] += float( torch.sum( torch.abs( diff_ccs ) ).item() )
                 totals[ 'ccs_sq_sum' ] += float( torch.sum( diff_ccs * diff_ccs ).item() )
                 totals[ 'ccs_count' ] += int( diff_ccs.shape[0] )
+
+            mask_charge = mask_bundle[ :, 3 ] > 0.5
+            if torch.any( mask_charge ):
+                pred_charge = pred[ 'charge_dist' ][ mask_charge ]
+                true_charge = target_bundle[ mask_charge, SCOUT_CHARGE_DIST_OFFSET : SCOUT_CHARGE_DIST_OFFSET + charge_dist_len ]
+                ce = -torch.sum( true_charge * torch.log( pred_charge.clamp( min=1e-12 ) ), dim=1 )
+                totals[ 'charge_ce_sum' ] += float( torch.sum( ce ).item() )
+                totals[ 'charge_count' ] += int( ce.shape[0] )
 
     metrics = { 'test_ms2_cosine' : 0.0,
                 'test_ms2_count' : int( totals[ 'ms2_count' ] ),
@@ -233,7 +358,9 @@ def _evaluate_scout_loader( model,
                 'test_irt_count' : int( totals[ 'irt_count' ] ),
                 'test_ccs_mae' : 0.0,
                 'test_ccs_rmse' : 0.0,
-                'test_ccs_count' : int( totals[ 'ccs_count' ] ), }
+                'test_ccs_count' : int( totals[ 'ccs_count' ] ),
+                'test_charge_ce' : 0.0,
+                'test_charge_count' : int( totals[ 'charge_count' ] ), }
 
     if totals[ 'ms2_count' ] > 0:
         metrics[ 'test_ms2_cosine' ] = totals[ 'ms2_cosine_sum' ] / totals[ 'ms2_count' ]
@@ -243,6 +370,8 @@ def _evaluate_scout_loader( model,
     if totals[ 'ccs_count' ] > 0:
         metrics[ 'test_ccs_mae' ] = totals[ 'ccs_abs_sum' ] / totals[ 'ccs_count' ]
         metrics[ 'test_ccs_rmse' ] = ( totals[ 'ccs_sq_sum' ] / totals[ 'ccs_count' ] ) ** 0.5
+    if totals[ 'charge_count' ] > 0:
+        metrics[ 'test_charge_ce' ] = totals[ 'charge_ce_sum' ] / totals[ 'charge_count' ]
     if label is not None:
         print( label + ' complete: processed ' + str(total_rows) +
                ' rows in ' + _format_elapsed( start_time ) +
@@ -257,7 +386,11 @@ def _compute_balanced_checkpoint_score( metrics ):
     ms2_component = ( 1.0 - float( metrics[ 'test_ms2_cosine' ] ) ) / 0.1
     rt_component = float( metrics[ 'test_irt_mae' ] ) / 1.0
     ccs_component = float( metrics[ 'test_ccs_mae' ] ) / 10.0
-    return ( ( ms2_component ** 2 + rt_component ** 2 + ccs_component ** 2 ) / 3.0 ) ** 0.5
+    charge_component = float( metrics[ 'test_charge_ce' ] ) / CHARGE_CE_BASELINE
+    return ( CHECKPOINT_SCORE_WEIGHTS[ 'ms2' ] * ( ms2_component ** 2 ) +
+             CHECKPOINT_SCORE_WEIGHTS[ 'irt' ] * ( rt_component ** 2 ) +
+             CHECKPOINT_SCORE_WEIGHTS[ 'ccs' ] * ( ccs_component ** 2 ) +
+             CHECKPOINT_SCORE_WEIGHTS[ 'charge_dist' ] * ( charge_component ** 2 ) ) ** 0.5
 
 
 def _evaluate_scout_dataset_with_backoff( model,
@@ -394,7 +527,8 @@ def _build_fixed_sample_loader( dataset, batch_size, sample_rows, seed, empty_er
                     'seed' : int( seed ),
                     'ms2_rows' : int( mask_tensor[:, 0].sum().item() ),
                     'irt_rows' : int( mask_tensor[:, 1].sum().item() ),
-                    'ccs_rows' : int( mask_tensor[:, 2].sum().item() ), }
+                    'ccs_rows' : int( mask_tensor[:, 2].sum().item() ),
+                    'charge_dist_rows' : int( mask_tensor[:, 3].sum().item() ), }
     return loader, sample_info
 
 
@@ -439,8 +573,8 @@ class ScoutMiniEvalReporter( object ):
 
     def print_header( self ):
         print( 'Mini Eval (fixed seeded test sample)' )
-        print( ' epoch | train_batch | elapsed  | ckpt_rms | ms2_cos  | n_ms2 | irt_mae  | n_irt | ccs_mae  | n_ccs ' )
-        print( '-------|-------------|----------|----------|----------|-------|----------|-------|----------|-------' )
+        print( ' epoch | train_batch | elapsed  | ckpt_rms | ms2_cos  | n_ms2 | irt_mae  | n_irt | ccs_mae  | n_ccs | chg_ce   | n_chg ' )
+        print( '-------|-------------|----------|----------|----------|-------|----------|-------|----------|-------|----------|-------' )
 
     def __call__( self, model, epoch, phase, batch_index, batch_size, batch_loss, device ):
         if phase != 'train':
@@ -459,13 +593,15 @@ class ScoutMiniEvalReporter( object ):
         print( format( int(epoch), '6d' ) + ' | ' +
                format( int(self.global_batches), '11d' ) + ' | ' +
                elapsed.rjust(8) + ' | ' +
-               format( checkpoint_score, '8.4f' ) + ' | ' +
-               format( metrics[ 'test_ms2_cosine' ], '8.4f' ) + ' | ' +
-               format( metrics[ 'test_ms2_count' ], '5d' ) + ' | ' +
-               format( metrics[ 'test_irt_mae' ], '8.4f' ) + ' | ' +
-               format( metrics[ 'test_irt_count' ], '5d' ) + ' | ' +
-               format( metrics[ 'test_ccs_mae' ], '8.4f' ) + ' | ' +
-               format( metrics[ 'test_ccs_count' ], '5d' ) )
+                 format( checkpoint_score, '8.4f' ) + ' | ' +
+                 format( metrics[ 'test_ms2_cosine' ], '8.4f' ) + ' | ' +
+                 format( metrics[ 'test_ms2_count' ], '5d' ) + ' | ' +
+                 format( metrics[ 'test_irt_mae' ], '8.4f' ) + ' | ' +
+                 format( metrics[ 'test_irt_count' ], '5d' ) + ' | ' +
+                 format( metrics[ 'test_ccs_mae' ], '8.4f' ) + ' | ' +
+                 format( metrics[ 'test_ccs_count' ], '5d' ) + ' | ' +
+                 format( metrics[ 'test_charge_ce' ], '8.4f' ) + ' | ' +
+                 format( metrics[ 'test_charge_count' ], '5d' ) )
         self.rows_printed += 1
 
 
@@ -495,6 +631,14 @@ class ScoutCheckpointMetric( object ):
         self.last_effective_eval_batch_size = None
         self.last_full_metrics = None
         self.last_full_effective_eval_batch_size = None
+        self.promoted_epoch = None
+        self.promoted_metrics = None
+        self.promoted_effective_eval_batch_size = None
+        self.promoted_sample_score = None
+        self.promoted_full_score = None
+        self.promoted_full_metrics = None
+        self.promoted_full_effective_eval_batch_size = None
+        self.promoted_checkpoint_path = None
 
     def __call__( self, model, dataset, phase, device, epoch, epoch_loss ):
         metrics = _evaluate_scout_loader( model,
@@ -512,30 +656,134 @@ class ScoutCheckpointMetric( object ):
         print( 'Val checkpoint sample metrics: MS2 cosine=' + format( metrics[ 'test_ms2_cosine' ], '.6f' ) +
                 ', iRT MAE=' + format( metrics[ 'test_irt_mae' ], '.6f' ) +
                 ', CCS MAE=' + format( metrics[ 'test_ccs_mae' ], '.6f' ) +
+                ', charge CE=' + format( metrics[ 'test_charge_ce' ], '.6f' ) +
                 ', sample_rows=' + str( self.sample_info[ 'sample_rows_actual' ] ) +
                 ', eval_batch_size=' + str( effective_batch_size ) )
-
-        if self.full_dataset is not None and self.full_eval_every_epochs is not None and self.full_eval_every_epochs > 0:
-            if int(epoch) % self.full_eval_every_epochs == 0:
-                full_metrics, full_effective_batch_size = evaluate_scout_dataset( model,
-                                                                                  self.full_dataset,
-                                                                                  self.scalar_stats,
-                                                                                  self.eval_batch_size,
-                                                                                  self.num_workers,
-                                                                                  device=self.eval_device,
-                                                                                  label='Full val audit',
-                                                                                  expected_rows=self.expected_rows,
-                                                                                  progress_tick_rows=self.progress_tick_rows,
-                                                                                  return_effective_batch_size=True )
-                full_score = _compute_balanced_checkpoint_score( full_metrics )
-                self.last_full_metrics = dict( full_metrics )
-                self.last_full_metrics[ 'balanced_checkpoint_score' ] = float( full_score )
-                self.last_full_effective_eval_batch_size = int( full_effective_batch_size )
-                print( 'Full val audit metrics: MS2 cosine=' + format( full_metrics[ 'test_ms2_cosine' ], '.6f' ) +
-                       ', iRT MAE=' + format( full_metrics[ 'test_irt_mae' ], '.6f' ) +
-                       ', CCS MAE=' + format( full_metrics[ 'test_ccs_mae' ], '.6f' ) +
-                       ', eval_batch_size=' + str( full_effective_batch_size ) )
         return float( score ), 'balanced_rms'
+
+    def _candidate_checkpoint_path( self, checkpoint_path ):
+        return checkpoint_path + '.candidate'
+
+    def _run_full_val_audit( self, checkpoint_path, label ):
+        best_model = initialize_scout_model( model_file=checkpoint_path, map_location='cpu' )
+        full_metrics, full_effective_batch_size = evaluate_scout_dataset( best_model,
+                                                                          self.full_dataset,
+                                                                          self.scalar_stats,
+                                                                          self.eval_batch_size,
+                                                                          self.num_workers,
+                                                                          device=self.eval_device,
+                                                                          label=label,
+                                                                          expected_rows=self.expected_rows,
+                                                                          progress_tick_rows=self.progress_tick_rows,
+                                                                          return_effective_batch_size=True )
+        full_score = _compute_balanced_checkpoint_score( full_metrics )
+        self.last_full_metrics = dict( full_metrics )
+        self.last_full_metrics[ 'balanced_checkpoint_score' ] = float( full_score )
+        self.last_full_effective_eval_batch_size = int( full_effective_batch_size )
+        print( label + ' metrics: MS2 cosine=' + format( full_metrics[ 'test_ms2_cosine' ], '.6f' ) +
+               ', iRT MAE=' + format( full_metrics[ 'test_irt_mae' ], '.6f' ) +
+               ', CCS MAE=' + format( full_metrics[ 'test_ccs_mae' ], '.6f' ) +
+               ', charge CE=' + format( full_metrics[ 'test_charge_ce' ], '.6f' ) +
+               ', eval_batch_size=' + str( full_effective_batch_size ) )
+        return float( full_score )
+
+    def _promote_checkpoint( self, source_path, target_path, epoch, sample_score, full_score ):
+        if os.path.abspath( source_path ) != os.path.abspath( target_path ):
+            shutil.copyfile( source_path, target_path )
+        self.promoted_checkpoint_path = os.path.abspath( target_path )
+        self.promoted_epoch = int( epoch )
+        self.promoted_sample_score = float( sample_score )
+        self.promoted_full_score = float( full_score )
+        self.promoted_full_metrics = None if self.last_full_metrics is None else dict( self.last_full_metrics )
+        self.promoted_full_effective_eval_batch_size = self.last_full_effective_eval_batch_size
+
+    def _update_promoted_sample_state( self, checkpoint_path, epoch, sample_score, metrics=None, effective_batch_size=None ):
+        self.promoted_checkpoint_path = os.path.abspath( checkpoint_path )
+        self.promoted_epoch = int( epoch ) if epoch is not None else None
+        self.promoted_sample_score = float( sample_score )
+        if metrics is not None:
+            self.promoted_metrics = dict( metrics )
+        if effective_batch_size is not None:
+            self.promoted_effective_eval_batch_size = int( effective_batch_size )
+
+    def prime_checkpoint( self, checkpoint_path, epoch, sample_score, sample_metrics=None, effective_batch_size=None, run_full_val=False ):
+        self._update_promoted_sample_state( checkpoint_path,
+                                            epoch,
+                                            sample_score,
+                                            metrics=sample_metrics,
+                                            effective_batch_size=effective_batch_size )
+        if run_full_val:
+            full_score = self._run_full_val_audit( checkpoint_path, 'Initial full val audit' )
+            self._promote_checkpoint( checkpoint_path, checkpoint_path, epoch, sample_score, full_score )
+        else:
+            self.promoted_full_score = None
+            self.promoted_full_metrics = None
+            self.promoted_full_effective_eval_batch_size = None
+
+    def handle_checkpoint_candidate( self, model, file_name, epoch, checkpoint_loss, prior_best_loss, prior_best_epoch, tolerance ):
+        warmup_epochs = self.full_eval_every_epochs
+        if warmup_epochs is None or warmup_epochs <= 0 or int(epoch) < warmup_epochs or self.promoted_full_score is None:
+            torch.save( model.state_dict(), file_name )
+            self._update_promoted_sample_state( file_name,
+                                                epoch,
+                                                checkpoint_loss,
+                                                metrics=self.last_metrics,
+                                                effective_batch_size=self.last_effective_eval_batch_size )
+            print( 'Fast checkpoint best updated for epoch ' + str(int(epoch)) +
+                   '; full val promotion gate activates after epoch ' + str(int(warmup_epochs)) )
+            return { 'promoted' : True,
+                     'best_loss' : float( checkpoint_loss ),
+                     'best_epoch' : int( epoch ),
+                     'reset_patience' : True }
+
+        candidate_path = self._candidate_checkpoint_path( file_name )
+        torch.save( model.state_dict(), candidate_path )
+        print( 'Fast checkpoint candidate at epoch ' + str(int(epoch)) +
+               ' beat the promoted subset score; running full val audit before promotion' )
+        candidate_full_score = self._run_full_val_audit( candidate_path, 'Full val candidate audit' )
+        if candidate_full_score < self.promoted_full_score - float(tolerance):
+            self._update_promoted_sample_state( file_name,
+                                                epoch,
+                                                checkpoint_loss,
+                                                metrics=self.last_metrics,
+                                                effective_batch_size=self.last_effective_eval_batch_size )
+            self._promote_checkpoint( candidate_path, file_name, epoch, checkpoint_loss, candidate_full_score )
+            print( 'Full val improved over promoted best; epoch ' + str(int(epoch)) + ' is now the best checkpoint' )
+            return { 'promoted' : True,
+                     'best_loss' : float( checkpoint_loss ),
+                     'best_epoch' : int( epoch ),
+                     'reset_patience' : True }
+
+        print( 'Full val did not improve over promoted best epoch ' + str(int(self.promoted_epoch)) +
+               ' (' + format( self.promoted_full_score, '.6f' ) + '); keeping existing best checkpoint' )
+        return { 'promoted' : False,
+                 'best_loss' : float( prior_best_loss ),
+                 'best_epoch' : int( prior_best_epoch ),
+                 'reset_patience' : False }
+
+    def post_checkpoint_update( self, checkpoint_path, epoch, best_loss, best_epoch, improved_on_sample ):
+        if self.full_dataset is None or self.full_eval_every_epochs is None or self.full_eval_every_epochs <= 0:
+            return
+        if self.promoted_full_score is not None:
+            return
+        if int(epoch) != self.full_eval_every_epochs:
+            return
+        if not os.path.exists( checkpoint_path ):
+            return
+
+        print( 'Epoch ' + str(int(epoch)) + ' reached the full val promotion gate; auditing current fast-checkpoint best epoch ' +
+               str(int(best_epoch)) + ' from ' + checkpoint_path )
+        full_score = self._run_full_val_audit( checkpoint_path, 'Full val audit' )
+        self._promote_checkpoint( checkpoint_path, checkpoint_path, best_epoch, best_loss, full_score )
+        print( 'Established promoted full-val best at epoch ' + str(int(best_epoch)) +
+               ' with subset score ' + format( float(best_loss), '.6f' ) +
+               ' and full val score ' + format( float(full_score), '.6f' ) )
+
+    def ensure_full_val_baseline( self, checkpoint_path, best_loss, best_epoch ):
+        if self.promoted_full_score is None:
+            full_score = self._run_full_val_audit( checkpoint_path, 'Final full val audit' )
+            self._promote_checkpoint( checkpoint_path, checkpoint_path, best_epoch, best_loss, full_score )
+        return dict( self.promoted_full_metrics ), int( self.promoted_full_effective_eval_batch_size )
 
 
 def write_metadata( metadata_path,
@@ -584,13 +832,17 @@ def write_metadata( metadata_path,
                                        'ms2_head_extra_resnet_blocks' : 1,
                                        'irt_inputs' : [ 'pooled_seq_features' ],
                                        'ccs_inputs' : [ 'pooled_seq_features', 'charge_onehot' ],
+                                       'charge_dist_inputs' : [ 'pooled_seq_features' ],
                                        'max_peptide_len' : int( max_peptide_len ),
                                        'n_ion_channels' : int( n_ion_channels ),
-                                       'ms2_vector_len' : int( ms2_vector_len ), },
+                                       'ms2_vector_len' : int( ms2_vector_len ),
+                                       'charge_dist_len' : int( charge_dist_len ), },
                  'training_parameters' : _serialize_training_parameters(),
-                 'checkpoint_strategy' : { 'mode' : 'fixed_seeded_val_subset',
+                 'checkpoint_strategy' : { 'mode' : 'warmup_then_full_val_gate',
                                            'checkpoint_sample_info' : None if checkpoint_sample_info is None else dict( checkpoint_sample_info ),
-                                           'full_val_audit_interval_epochs' : None if full_val_audit_interval_epochs is None else int( full_val_audit_interval_epochs ), },
+                                           'warmup_epochs' : None if full_val_audit_interval_epochs is None else int( full_val_audit_interval_epochs ),
+                                           'score_weights' : dict( CHECKPOINT_SCORE_WEIGHTS ),
+                                           'charge_ce_baseline' : float( CHARGE_CE_BASELINE ), },
                  'best_val_loss' : float( best_loss ),
                  'best_val_checkpoint_score' : float( best_loss ),
                  'best_val_checkpoint_metrics' : None if checkpoint_metrics is None else dict( checkpoint_metrics ),
@@ -629,38 +881,38 @@ def train_scout( dataset_root,
            str(len(test_files)) + ' test shards' )
     print( 'Using train shards for fitting, val shards for in-training checkpoint selection, and test shards only for final evaluation.' )
 
-    print( 'Scanning train split...' )
-    train_scan = scan_distilled_dataset( train_files )
+    train_scan, val_scan, test_scan, scalar_stats = _scan_or_load_dataset_stats( dataset_root,
+                                                                                  train_files,
+                                                                                  val_files,
+                                                                                  test_files )
     print( 'Train tokenized rows=' + str( train_scan[ 'rows_tokenized' ] ) +
            ', MS2=' + str( train_scan[ 'ms2_rows' ] ) +
            ', iRT=' + str( train_scan[ 'irt_rows' ] ) +
-           ', CCS=' + str( train_scan[ 'ccs_rows' ] ) )
+           ', CCS=' + str( train_scan[ 'ccs_rows' ] ) +
+           ', charge_dist=' + str( train_scan[ 'charge_dist_rows' ] ) )
     if len( train_scan[ 'skip_counts' ] ) > 0:
         parts = [ key + '=' + str(value) for key, value in _top_counts( train_scan[ 'skip_counts' ], n=12 ) ]
         print( 'Train top skip reasons: ' + ', '.join( parts ) )
 
-    print( 'Scanning val split...' )
-    val_scan = scan_distilled_dataset( val_files )
     print( 'Val tokenized rows=' + str( val_scan[ 'rows_tokenized' ] ) +
            ', MS2=' + str( val_scan[ 'ms2_rows' ] ) +
            ', iRT=' + str( val_scan[ 'irt_rows' ] ) +
-           ', CCS=' + str( val_scan[ 'ccs_rows' ] ) )
+           ', CCS=' + str( val_scan[ 'ccs_rows' ] ) +
+           ', charge_dist=' + str( val_scan[ 'charge_dist_rows' ] ) )
     if len( val_scan[ 'skip_counts' ] ) > 0:
         parts = [ key + '=' + str(value) for key, value in _top_counts( val_scan[ 'skip_counts' ], n=12 ) ]
         print( 'Val top skip reasons: ' + ', '.join( parts ) )
 
     # Test coverage is logged for passive dashboarding and the final holdout report only.
-    print( 'Scanning test split...' )
-    test_scan = scan_distilled_dataset( test_files )
     print( 'Test tokenized rows=' + str( test_scan[ 'rows_tokenized' ] ) +
            ', MS2=' + str( test_scan[ 'ms2_rows' ] ) +
            ', iRT=' + str( test_scan[ 'irt_rows' ] ) +
-           ', CCS=' + str( test_scan[ 'ccs_rows' ] ) )
+           ', CCS=' + str( test_scan[ 'ccs_rows' ] ) +
+           ', charge_dist=' + str( test_scan[ 'charge_dist_rows' ] ) )
     if len( test_scan[ 'skip_counts' ] ) > 0:
         parts = [ key + '=' + str(value) for key, value in _top_counts( test_scan[ 'skip_counts' ], n=12 ) ]
         print( 'Test top skip reasons: ' + ', '.join( parts ) )
 
-    scalar_stats = _scalar_stats_from_train( train_scan )
     print( 'Train-only scalar normalization: iRT mean=' + format( scalar_stats[ 'irt_mean' ], '.6f' ) +
            ', std=' + format( scalar_stats[ 'irt_std' ], '.6f' ) +
            '; CCS mean=' + format( scalar_stats[ 'ccs_mean' ], '.6f' ) +
@@ -679,7 +931,8 @@ def train_scout( dataset_root,
            ', seed=' + str( mini_eval_info[ 'seed' ] ) +
            ', MS2=' + str( mini_eval_info[ 'ms2_rows' ] ) +
            ', iRT=' + str( mini_eval_info[ 'irt_rows' ] ) +
-           ', CCS=' + str( mini_eval_info[ 'ccs_rows' ] ) )
+           ', CCS=' + str( mini_eval_info[ 'ccs_rows' ] ) +
+           ', charge_dist=' + str( mini_eval_info[ 'charge_dist_rows' ] ) )
 
     val_checkpoint_loader, val_checkpoint_info = build_fixed_val_checkpoint_loader( val_files,
                                                                                     scalar_stats,
@@ -692,7 +945,8 @@ def train_scout( dataset_root,
            ', seed=' + str( val_checkpoint_info[ 'seed' ] ) +
            ', MS2=' + str( val_checkpoint_info[ 'ms2_rows' ] ) +
            ', iRT=' + str( val_checkpoint_info[ 'irt_rows' ] ) +
-           ', CCS=' + str( val_checkpoint_info[ 'ccs_rows' ] ) )
+           ', CCS=' + str( val_checkpoint_info[ 'ccs_rows' ] ) +
+           ', charge_dist=' + str( val_checkpoint_info[ 'charge_dist_rows' ] ) )
 
     datasets = { 'train' : ScoutDistilledDataset( train_files,
                                                   scalar_stats[ 'irt_mean' ],
@@ -726,6 +980,33 @@ def train_scout( dataset_root,
                                               expected_rows=val_scan[ 'rows_tokenized' ],
                                               progress_tick_rows=progress_tick_rows,
                                               full_eval_every_epochs=FULL_VAL_AUDIT_INTERVAL_EPOCHS )
+    initial_best_loss = None
+    initial_best_epoch = 0
+    if model_file is not None:
+        baseline_model = initialize_scout_model( model_file=model_file, map_location='cpu' )
+        baseline_metrics = _evaluate_scout_loader( baseline_model,
+                                                   val_checkpoint_loader,
+                                                   scalar_stats,
+                                                   device=eval_device )
+        baseline_sample_score = _compute_balanced_checkpoint_score( baseline_metrics )
+        checkpoint_metric.last_metrics = dict( baseline_metrics )
+        checkpoint_metric.last_metrics[ 'balanced_checkpoint_score' ] = float( baseline_sample_score )
+        checkpoint_metric.last_metrics[ 'sample_rows' ] = int( val_checkpoint_info[ 'sample_rows_actual' ] )
+        checkpoint_metric.last_metrics[ 'rows_seen' ] = int( val_checkpoint_info[ 'rows_seen' ] )
+        checkpoint_metric.last_metrics[ 'sample_seed' ] = int( val_checkpoint_info[ 'seed' ] )
+        checkpoint_metric.last_effective_eval_batch_size = int( val_checkpoint_info[ 'batch_size' ] )
+        torch.save( baseline_model.state_dict(), output_file_name )
+        initial_best_epoch = max( 0, int(start_epoch) - 1 )
+        checkpoint_metric.prime_checkpoint( output_file_name,
+                                            initial_best_epoch,
+                                            baseline_sample_score,
+                                            sample_metrics=checkpoint_metric.last_metrics,
+                                            effective_batch_size=checkpoint_metric.last_effective_eval_batch_size,
+                                            run_full_val=int(start_epoch) > FULL_VAL_AUDIT_INTERVAL_EPOCHS )
+        initial_best_loss = float( baseline_sample_score )
+        print( 'Primed resume checkpoint: subset score=' + format( baseline_sample_score, '.6f' ) +
+               ', epoch=' + str(initial_best_epoch) +
+               ', full_val_ready=' + str( checkpoint_metric.promoted_full_score is not None ) )
 
     best_checkpoint_score = train_model( model,
                                          datasets,
@@ -747,19 +1028,14 @@ def train_scout( dataset_root,
                                          skip_batch_phases={ 'val' },
                                          patience=patience,
                                          start_epoch=start_epoch,
-                                         max_train_batches_per_epoch=training_parameters.get( 'max_train_batches_per_epoch' ) )
+                                         max_train_batches_per_epoch=training_parameters.get( 'max_train_batches_per_epoch' ),
+                                         initial_best_loss=initial_best_loss,
+                                         initial_best_epoch=initial_best_epoch )
 
-    best_model = initialize_scout_model( model_file=output_file_name, map_location='cpu' )
-    full_val_metrics, full_val_eval_batch_size = evaluate_scout_dataset( best_model,
-                                                                         datasets[ 'val' ],
-                                                                         scalar_stats,
-                                                                         eval_batch_size,
-                                                                         num_workers,
-                                                                         device=eval_device,
-                                                                         label='Final full val',
-                                                                         expected_rows=val_scan[ 'rows_tokenized' ],
-                                                                         progress_tick_rows=progress_tick_rows,
-                                                                         return_effective_batch_size=True )
+    full_val_metrics, full_val_eval_batch_size = checkpoint_metric.ensure_full_val_baseline( output_file_name,
+                                                                                              best_checkpoint_score,
+                                                                                              checkpoint_metric.promoted_epoch if checkpoint_metric.promoted_epoch is not None else num_epochs )
+    promoted_full_val_score = float( checkpoint_metric.promoted_full_score )
 
     # Final test evaluation runs once after the best checkpoint is frozen from validation metrics.
     best_model = initialize_scout_model( model_file=output_file_name, map_location='cpu' )
@@ -786,13 +1062,15 @@ def train_scout( dataset_root,
                     val_scan,
                     test_scan,
                     metrics,
-                    best_checkpoint_score,
-                    checkpoint_metrics=checkpoint_metric.last_metrics,
+                    promoted_full_val_score,
+                    checkpoint_metrics=checkpoint_metric.promoted_metrics,
                     full_val_metrics=full_val_metrics,
                     checkpoint_sample_info=val_checkpoint_info,
                     full_val_audit_interval_epochs=FULL_VAL_AUDIT_INTERVAL_EPOCHS )
 
-    print( 'Best val checkpoint score: ' + format( float(best_checkpoint_score), '.6f' ) )
+    print( 'Best fast val checkpoint score: ' + format( float(best_checkpoint_score), '.6f' ) )
+    print( 'Promoted full val score: ' + format( promoted_full_val_score, '.6f' ) +
+           ' (epoch ' + str( checkpoint_metric.promoted_epoch ) + ')' )
     print( 'Final full val eval batch size: ' + str( full_val_eval_batch_size ) )
     print( 'Full val MS2 cosine: ' + format( full_val_metrics[ 'test_ms2_cosine' ], '.6f' ) +
            ' (n=' + str(full_val_metrics[ 'test_ms2_count' ]) + ')' )
@@ -802,6 +1080,8 @@ def train_scout( dataset_root,
     print( 'Full val CCS MAE/RMSE: ' + format( full_val_metrics[ 'test_ccs_mae' ], '.6f' ) +
            ' / ' + format( full_val_metrics[ 'test_ccs_rmse' ], '.6f' ) +
            ' (n=' + str(full_val_metrics[ 'test_ccs_count' ]) + ')' )
+    print( 'Full val charge CE: ' + format( full_val_metrics[ 'test_charge_ce' ], '.6f' ) +
+           ' (n=' + str(full_val_metrics[ 'test_charge_count' ]) + ')' )
     print( 'Final test eval batch size: ' + str( final_eval_batch_size ) )
     print( 'Test MS2 cosine: ' + format( metrics[ 'test_ms2_cosine' ], '.6f' ) +
            ' (n=' + str(metrics[ 'test_ms2_count' ]) + ')' )
@@ -811,9 +1091,12 @@ def train_scout( dataset_root,
     print( 'Test CCS MAE/RMSE: ' + format( metrics[ 'test_ccs_mae' ], '.6f' ) +
            ' / ' + format( metrics[ 'test_ccs_rmse' ], '.6f' ) +
            ' (n=' + str(metrics[ 'test_ccs_count' ]) + ')' )
+    print( 'Test charge CE: ' + format( metrics[ 'test_charge_ce' ], '.6f' ) +
+           ' (n=' + str(metrics[ 'test_charge_count' ]) + ')' )
     print( 'Wrote metadata: ' + metadata_path )
-    return { 'best_test_loss' : float( best_checkpoint_score ),
+    return { 'best_test_loss' : float( promoted_full_val_score ),
              'best_val_checkpoint_score' : float( best_checkpoint_score ),
+             'best_full_val_score' : float( promoted_full_val_score ),
              'metadata_path' : metadata_path,
              'metrics' : metrics, }
 
